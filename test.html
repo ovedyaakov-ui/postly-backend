@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="he">
+<head>
+    <meta charset="UTF-8" />
+    <title>בדיקת Postly Backend</title>
+</head>
+<body>
+    <h2>בדיקת Postly Backend</h2>
+
+    <form id="uploadForm" enctype="multipart/form-data">
+        <input type="file" id="image" name="image" accept="image/*" />
+        <button type="button" onclick="sendImage()">שלח תמונה</button>
+    </form>
+
+    <h3>תוצאה:</h3>
+    <pre id="result"></pre>
+
+    <script>
+        async function sendImage() {
+            const fileInput = document.getElementById("image");
+            const result = document.getElementById("result");
+
+            if (!fileInput.files.length) {
+                result.textContent = "לא נבחרה תמונה.";
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append("image", fileInput.files[0]);
+
+            try {
+                const response = await fetch("http://localhost:3001/process", {
+                    method: "POST",
+                    body: formData
+                });
+
+                const json = await response.json();
+                result.textContent = JSON.stringify(json, null, 2);
+            } catch (err) {
+                result.textContent = "שגיאה: " + err;
+            }
+        }
+    </script>
+</body>
+</html>
