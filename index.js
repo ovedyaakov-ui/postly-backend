@@ -11,9 +11,15 @@ const upload = multer({ dest: "uploads/" });
 app.post("/analyze", upload.single("image"), (req, res) => {
   console.log("📥 REQUEST הגיע לשרת");
   console.log("📄 FILE:", req.file);
-  res.json({ text: "Postly backend עובד 🎉" });
+
+  // פוסט דמה – שלב ביניים
+  res.json({
+    text: "📸 רגעים קטנים עושים יום גדול ✨\nמתחיל את היום עם אנרגיה טובה ☕️🔥"
+  });
 });
 
-app.listen(3001, () => {
-  console.log("🔥 Backend עובד על פורט 3001");
+// ⚠️ תיקון קריטי ל־Render
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+  console.log("🔥 Backend עובד על פורט", PORT);
 });
