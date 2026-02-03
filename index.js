@@ -8,17 +8,32 @@ app.use(express.json());
 
 const upload = multer({ dest: "uploads/" });
 
+/**
+ * POST /analyze
+ * האפליקציה שולחת תמונה → השרת מחזיר פוסט דמה
+ */
 app.post("/analyze", upload.single("image"), (req, res) => {
   console.log("📥 REQUEST הגיע לשרת");
   console.log("📄 FILE:", req.file);
 
-  // פוסט דמה – שלב ביניים
   res.json({
     text: "📸 רגעים קטנים עושים יום גדול ✨\nמתחיל את היום עם אנרגיה טובה ☕️🔥"
   });
 });
 
-// ⚠️ תיקון קריטי ל־Render
+/**
+ * GET /analyze
+ * בדיקה פשוטה בדפדפן / PowerShell
+ */
+app.get("/analyze", (req, res) => {
+  res.json({
+    text: "📸 Postly בדיקה – השרת מחזיר פוסט כמו שצריך ✅"
+  });
+});
+
+/**
+ * חובה ל-Render
+ */
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log("🔥 Backend עובד על פורט", PORT);
