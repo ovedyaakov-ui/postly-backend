@@ -9,6 +9,14 @@ app.use(express.json());
 const upload = multer({ dest: "uploads/" });
 
 /**
+ * ✅ בדיקת חיים – רק לבדיקה בדפדפן
+ * לא קשור לאפליקציה
+ */
+app.get("/", (req, res) => {
+  res.send("Postly backend alive ✅");
+});
+
+/**
  * POST /analyze
  * האפליקציה שולחת תמונה → השרת מחזיר פוסט דמה
  */
@@ -23,7 +31,7 @@ app.post("/analyze", upload.single("image"), (req, res) => {
 
 /**
  * GET /analyze
- * בדיקה פשוטה בדפדפן / PowerShell
+ * בדיקה ידנית (לא חובה לאפליקציה)
  */
 app.get("/analyze", (req, res) => {
   res.json({
