@@ -46,7 +46,37 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
             content: [
               {
                 type: "text",
-                text: "תאר בצורה קצרה וברורה מה מופיע בתמונה, ואז צור פוסט קצר ומושך לפייסבוק או אינסטגרם בעברית.",
+                text: `אתה כותב פוסטים מקצועי לרשתות חברתיות בעברית.
+
+תאר בקצרה מה מופיע בתמונה, ואז צור 3 גרסאות פוסט שונות:
+
+1. **רגשי** - פוסט חם ומרגש שמתחבר לרגשות
+2. **מכירתי** - פוסט עם קריאה לפעולה ושכנוע
+3. **מצחיק** - פוסט קליל ומשעשע
+
+כל פוסט צריך להיות:
+- 4-6 שורות
+- עם אימוג'ים מתאימים
+- עם 3-5 האשטאגים רלוונטיים
+
+החזר את התשובה בפורמט JSON בדיוק כך:
+{
+  "description": "תיאור קצר של התמונה",
+  "posts": [
+    {
+      "type": "רגשי",
+      "text": "הפוסט הרגשי כאן..."
+    },
+    {
+      "type": "מכירתי", 
+      "text": "הפוסט המכירתי כאן..."
+    },
+    {
+      "type": "מצחיק",
+      "text": "הפוסט המצחיק כאן..."
+    }
+  ]
+}`,
               },
               {
                 type: "image_url",
@@ -57,16 +87,19 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
             ],
           },
         ],
-        max_tokens: 300,
+        max_tokens: 1000,
       }),
     });
 
     const data = await response.json();
-    const aiText = data?.choices?.[0]?.message?.content || "לא התקבלה תוצאה מה-AI.";
+    const aiText = data?.choices?.[0]?.message?.content || "{}";
 
     fs.unlinkSync(req.file.path);
 
-    res.json({ text: aiText });
+    const cleanText = aiText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+    const parsed = JSON.parse(cleanText);
+
+    res.json(parsed);
   } catch (error) {
     console.error("❌ OpenAI Error:", error);
     res.status(500).json({ error: "שגיאה בעיבוד התמונה" });
