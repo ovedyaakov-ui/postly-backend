@@ -8,21 +8,36 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const upload = multer({ dest: "uploads/" });
+/* =========================
+   Upload Config
+========================= */
+
+const upload = multer({
+  dest: "uploads/",
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+});
+
+/* =========================
+   API Key Check
+========================= */
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+if (!OPENAI_API_KEY) {
+  console.error("❌ חסר OPENAI_API_KEY");
+  process.exit(1);
+}
+
+/* =========================
+   Routes
+========================= */
 
 app.get("/", (req, res) => {
   res.send("Postly backend alive ✅");
 });
 
-app.get("/analyze", (req, res) => {
-  res.json({ text: "📸 Postly בדיקה – השרת מחזיר פוסט כמו שצריך ✅" });
-});
-
 app.post("/analyze", upload.single("image"), async (req, res) => {
   console.log("📥 POST /analyze הגיע");
-  console.log("📄 FILE:", req.file);
 
   if (!req.file) {
     return res.status(400).json({ error: "No image uploaded" });
@@ -40,42 +55,32 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       },
       body: JSON.stringify({
         model: "gpt-4o",
+        max_tokens: 800,
         messages: [
           {
             role: "user",
             content: [
               {
                 type: "text",
-                text: `אתה כותב פוסטים מקצועי לרשתות חברתיות בעברית.
+                text: `אתה קופירייטר ומנהל שיווק מקצועי.
 
-תאר בקצרה מה מופיע בתמונה, ואז צור 3 גרסאות פוסט שונות:
+המטרה שלך: לכתוב פוסט אחד חזק במיוחד, מוכן לפרסום מיידי במדיה חברתית, בהתאם למוצר או לתוכן שמופיע בתמונה.
 
-1. **רגשי** - פוסט חם ומרגש שמתחבר לרגשות
-2. **מכירתי** - פוסט עם קריאה לפעולה ושכנוע
-3. **מצחיק** - פוסט קליל ומשעשע
+הנחיות:
+- כתוב כאילו זה הפוסט היחיד שיעלה לעמוד.
+- פתיח חזק שתופס תשומת לב מיד.
+- שפה טבעית ואנושית.
+- לא להשתמש בביטויים גנריים כמו "הכירו את", "המוצר המושלם".
+- התאמת טון לסוג התוכן (אוכל חושני, נדל״ן יוקרתי, מוצר פרקטי וכו').
+- פסקאות קצרות וברורות.
+- 4–8 אימוג'ים רלוונטיים בלבד.
+- לא להמציא פרטים שלא נראים בתמונה.
+- הפוסט חייב להיות ברמה גבוהה ומוכן לפרסום ללא עריכה.
 
-כל פוסט צריך להיות:
-- 4-6 שורות
-- עם אימוג'ים מתאימים
-- עם 3-5 האשטאגים רלוונטיים
+החזר JSON בלבד בפורמט הבא:
 
-החזר את התשובה בפורמט JSON בדיוק כך:
 {
-  "description": "תיאור קצר של התמונה",
-  "posts": [
-    {
-      "type": "רגשי",
-      "text": "הפוסט הרגשי כאן..."
-    },
-    {
-      "type": "מכירתי", 
-      "text": "הפוסט המכירתי כאן..."
-    },
-    {
-      "type": "מצחיק",
-      "text": "הפוסט המצחיק כאן..."
-    }
-  ]
+  "post": "כאן יהיה הפוסט המלא"
 }`,
               },
               {
@@ -87,26 +92,50 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
             ],
           },
         ],
-        max_tokens: 1000,
       }),
     });
 
     const data = await response.json();
+
+    if (!response.ok) {
+      console.error("❌ OpenAI Error:", data);
+      return res.status(500).json({ error: "שגיאה מ-OpenAI" });
+    }
+
     const aiText = data?.choices?.[0]?.message?.content || "{}";
 
-    fs.unlinkSync(req.file.path);
+    const cleanText = aiText
+      .replace(/```json\n?/g, "")
+      .replace(/```\n?/g, "")
+      .trim();
 
-    const cleanText = aiText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-    const parsed = JSON.parse(cleanText);
+    let parsed;
+
+    try {
+      parsed = JSON.parse(cleanText);
+    } catch (err) {
+      console.error("❌ JSON parse error:", cleanText);
+      return res.status(500).json({ error: "AI החזיר JSON לא תקין" });
+    }
 
     res.json(parsed);
+
   } catch (error) {
-    console.error("❌ OpenAI Error:", error);
+    console.error("❌ Server Error:", error);
     res.status(500).json({ error: "שגיאה בעיבוד התמונה" });
+  } finally {
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
   }
 });
 
+/* =========================
+   Start Server
+========================= */
+
 const PORT = process.env.PORT || 3001;
+
 app.listen(PORT, () => {
   console.log("🔥 Backend עובד על פורט", PORT);
 });
