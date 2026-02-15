@@ -33,7 +33,10 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
     const imageBuffer = fs.readFileSync(req.file.path);
     const base64Image = imageBuffer.toString("base64");
 
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    // ===============================
+    // שלב 1 – יצירת טיוטה מהתמונה
+    // ===============================
+    const draftResponse = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -50,32 +53,28 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
                 type: "text",
                 text: `אתה קופירייטר מכירתי מדויק.
 
-שלב 1:
-רשום לעצמך תיאור יבש וקצר של מה שרואים בתמונה:
+שלב 1 (פנימי בלבד, אל תציג):
+רשום לעצמך תיאור יבש של:
 - סוג המוצר
 - צבעים בולטים
-- אלמנטים עיצוביים ברורים
-
-אל תציג את התיאור הזה בתשובה הסופית.
+- אלמנטים עיצוביים
 
 שלב 2:
-בהתבסס רק על התיאור הזה – כתוב פוסט מכירתי חד וברור.
+כתוב פוסט מכירתי חד וברור.
 
-חוקים קשיחים:
-- חייב לציין במפורש את סוג המוצר
-- חייב לציין לפחות 2 פרטים ויזואליים מדויקים
-- אסור טקסט פילוסופי או כללי
-- אסור לכתוב משהו שיכול להתאים לכל מוצר אחר
-- פתיח קצר וחזק בשורה הראשונה
-- עד 5 אימוג'ים רלוונטיים בלבד
+חוקים:
+- לציין במפורש את סוג המוצר
+- לציין לפחות 2 פרטים ויזואליים מדויקים
+- פתיח חזק
+- עד 5 אימוג'ים
+- בלי קלישאות
 - שפה ישירה וברורה
-- סיום בקריאה לפעולה: "פרטים בפרטי", "שלחו הודעה", "צרו קשר"
-- מוכן לפרסום ללא עריכה
+- סיום בקריאה לפעולה ברורה
 
 החזר JSON בלבד:
 {
   "post": ""
-}`,
+}`
               },
               {
                 type: "image_url",
@@ -89,29 +88,91 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       }),
     });
 
-    const data = await response.json();
+    const draftData = await draftResponse.json();
 
-    if (!response.ok) {
-      console.error("❌ OpenAI Error:", data);
-      return res.status(500).json({ error: "שגיאה מ-OpenAI" });
+    if (!draftResponse.ok) {
+      console.error("❌ OpenAI Draft Error:", draftData);
+      return res.status(500).json({ error: "שגיאה מ-OpenAI (Draft)" });
     }
 
-    const aiText = data?.choices?.[0]?.message?.content || "{}";
+    const draftText = draftData?.choices?.[0]?.message?.content || "{}";
 
-    const cleanText = aiText
+    const cleanDraft = draftText
       .replace(/```json\n?/g, "")
       .replace(/```\n?/g, "")
       .trim();
 
     let parsed;
     try {
-      parsed = JSON.parse(cleanText);
+      parsed = JSON.parse(cleanDraft);
     } catch (err) {
-      console.error("❌ JSON parse error:", cleanText);
+      console.error("❌ JSON parse error:", cleanDraft);
       return res.status(500).json({ error: "AI החזיר JSON לא תקין" });
     }
 
-    res.json(parsed);
+    // ===============================
+    // שלב 2 – שיפור אגרסיבי
+    // ===============================
+    const refineResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        max_tokens: 600,
+        messages: [
+          {
+            role: "user",
+            content: `שפר את הפוסט הבא לרמה גבוהה יותר.
+
+בצע:
+- חיזוק פתיח
+- חידוד מכירתי
+- הסרת ניסוחים כלליים
+- קיצור משפטים חלשים
+- חיזוק הקריאה לפעולה
+
+אל תכתוב מחדש לגמרי.
+רק שפר.
+
+החזר JSON בלבד:
+{
+  "post": ""
+}
+
+פוסט:
+${parsed.post}`
+          },
+        ],
+      }),
+    });
+
+    const refineData = await refineResponse.json();
+
+    if (!refineResponse.ok) {
+      console.error("❌ OpenAI Refine Error:", refineData);
+      return res.status(500).json({ error: "שגיאה בשיפור הפוסט" });
+    }
+
+    const refineText = refineData?.choices?.[0]?.message?.content || "{}";
+
+    const cleanRefine = refineText
+      .replace(/```json\n?/g, "")
+      .replace(/```\n?/g, "")
+      .trim();
+
+    let finalParsed;
+    try {
+      finalParsed = JSON.parse(cleanRefine);
+    } catch (err) {
+      console.error("❌ Refinement JSON parse error:", cleanRefine);
+      return res.status(500).json({ error: "AI החזיר JSON שיפור לא תקין" });
+    }
+
+    res.json(finalParsed);
+
   } catch (error) {
     console.error("❌ Server Error:", error);
     res.status(500).json({ error: "שגיאה בעיבוד התמונה" });
