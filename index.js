@@ -33,9 +33,6 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
     const imageBuffer = fs.readFileSync(req.file.path);
     const base64Image = imageBuffer.toString("base64");
 
-    // ===============================
-    // שלב 1 – יצירת טיוטה מהתמונה
-    // ===============================
     const draftResponse = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -110,9 +107,6 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       return res.status(500).json({ error: "AI החזיר JSON לא תקין" });
     }
 
-    // ===============================
-    // שלב 2 – שיפור אגרסיבי
-    // ===============================
     const refineResponse = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -180,6 +174,71 @@ ${parsed.post}`
     if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
+  }
+});
+
+app.post("/improve", async (req, res) => {
+  const { post, tone } = req.body;
+
+  if (!post) {
+    return res.status(400).json({ error: "No post provided" });
+  }
+
+  try {
+    let tonePrompt = "";
+    
+    if (tone === "aggressive") {
+      tonePrompt = "שכתב את הפוסט בסגנון מכירתי וחזק יותר";
+    } else if (tone === "luxury") {
+      tonePrompt = "שכתב את הפוסט בסגנון יוקרתי ומלוטש";
+    } else if (tone === "casual") {
+      tonePrompt = "שכתב את הפוסט בסגנון קליל ומשעשע";
+    }
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        max_tokens: 600,
+        messages: [
+          {
+            role: "user",
+            content: `${tonePrompt}:
+
+${post}
+
+החזר JSON:
+{
+  "post": ""
+}`
+          },
+        ],
+      }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      return res.status(500).json({ error: "שגיאה מ-OpenAI" });
+    }
+
+    const aiText = data?.choices?.[0]?.message?.content || "{}";
+    const cleanText = aiText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+
+    let parsed;
+    try {
+      parsed = JSON.parse(cleanText);
+    } catch (err) {
+      return res.status(500).json({ error: "AI החזיר JSON לא תקין" });
+    }
+
+    res.json(parsed);
+  } catch (error) {
+    res.status(500).json({ error: "שגיאה בשיפור" });
   }
 });
 
