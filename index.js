@@ -3,11 +3,18 @@ import multer from "multer";
 import cors from "cors";
 import fs from "fs";
 import fetch from "node-fetch";
+import admin from "firebase-admin";
+import serviceAccount from "./serviceAccountKey.json" assert { type: "json" };
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+const db = admin.firestore();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.set("trust proxy", 1);
 
 const upload = multer({
   dest: "uploads/",
@@ -21,158 +28,111 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
-/* =========================
-   DAILY LIMIT SYSTEM
-========================= */
+const MAX_IMAGES = 3;
+const MAX_UPGRADES_PER_IMAGE = 3;
 
-const DAILY_LIMIT_ANALYZE = 3;
-const DAILY_LIMIT_IMPROVE = 10;
-
-const usageMap = new Map();
-
-function getDateKey() {
-  return new Date().toDateString();
+function getDeviceId(req) {
+  return req.headers["x-device-id"] || null;
 }
-
-function getClientIp(req) {
-  return (req.ip || "").replace("::ffff:", "") || "unknown";
-}
-
-function ensureUsage(ip) {
-  const today = getDateKey();
-  const current = usageMap.get(ip);
-
-  if (!current || current.dateKey !== today) {
-    const fresh = { dateKey: today, analyzeCount: 0, improveCount: 0 };
-    usageMap.set(ip, fresh);
-    return fresh;
-  }
-
-  return current;
-}
-
-app.get("/", (req, res) => {
-  res.send("Postly backend alive ✅");
-});
 
 /* =========================
    ANALYZE
 ========================= */
 
 app.post("/analyze", upload.single("image"), async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: "No image uploaded" });
+  const deviceId = getDeviceId(req);
+  if (!deviceId) {
+    return res.status(400).json({ error: "Missing device ID" });
   }
 
-  const ip = getClientIp(req);
-  const usage = ensureUsage(ip);
+  const userRef = db.collection("users").doc(deviceId);
+  const userDoc = await userRef.get();
 
-  if (usage.analyzeCount >= DAILY_LIMIT_ANALYZE) {
+  let imagesUsed = 0;
+  let isAdmin = false;
+
+  if (!userDoc.exists) {
+    await userRef.set({ imagesUsed: 0, isAdmin: false });
+  } else {
+    const data = userDoc.data();
+    imagesUsed = data.imagesUsed || 0;
+    isAdmin = data.isAdmin || false;
+  }
+
+  if (!isAdmin && imagesUsed >= MAX_IMAGES) {
     return res.status(403).json({
       error: "Free limit reached",
-      message: `הגעת למכסה היומית (${DAILY_LIMIT_ANALYZE}). נסה שוב מחר.`,
+      message:
+        "סיימת את הניסיונות החינמיים. כדי להמשיך הירשם ועבור לגרסת Pro.",
     });
   }
 
-  usage.analyzeCount += 1;
+  const imageBuffer = fs.readFileSync(req.file.path);
+  const base64Image = imageBuffer.toString("base64");
 
   try {
-    const imageBuffer = fs.readFileSync(req.file.path);
-    const base64Image = imageBuffer.toString("base64");
-
-    const draftResponse = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o",
-        max_tokens: 700,
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: `אתה קופירייטר מכירתי מדויק.
-
-שלב 1 (פנימי בלבד):
-נתח סוג מוצר ופרטים ויזואליים.
-
-שלב 2:
-כתוב פוסט חד וברור.
-- פתיח חזק
-- עד 5 אימוג'ים
-- בלי קלישאות
-- קריאה לפעולה ברורה
-
-החזר JSON:
-{ "post": "" }`
-              },
-              {
-                type: "image_url",
-                image_url: {
-                  url: `data:image/jpeg;base64,${base64Image}`,
+    const response = await fetch(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4o",
+          max_tokens: 700,
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text:
+                    'נתח את התמונה וכתוב פוסט מכירתי. החזר JSON: { "post": "" }',
                 },
-              },
-            ],
-          },
-        ],
-      }),
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: `data:image/jpeg;base64,${base64Image}`,
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      }
+    );
+
+    const data = await response.json();
+    const text = data.choices[0].message.content
+      .replace(/```json/g, "")
+      .replace(/```/g, "")
+      .trim();
+
+    const parsed = JSON.parse(text);
+
+    const imageRef = userRef.collection("images").doc();
+
+    await imageRef.set({
+      upgradesUsed: 0,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    const draftData = await draftResponse.json();
-    if (!draftResponse.ok) {
-      return res.status(500).json({ error: "שגיאה מ-OpenAI (Draft)" });
+    if (!isAdmin) {
+      await userRef.update({
+        imagesUsed: admin.firestore.FieldValue.increment(1),
+      });
     }
 
-    const draftText = draftData?.choices?.[0]?.message?.content || "{}";
-    const cleanDraft = draftText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-    const parsed = JSON.parse(cleanDraft);
-
-    const refineResponse = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o",
-        max_tokens: 600,
-        messages: [
-          {
-            role: "user",
-            content: `שפר את הפוסט הבא לרמה גבוהה יותר.
-חזק פתיח, קצר משפטים, חדד מכירה.
-
-החזר JSON:
-{ "post": "" }
-
-פוסט:
-${parsed.post}`
-          },
-        ],
-      }),
+    res.json({
+      imageId: imageRef.id,
+      post: parsed.post,
     });
-
-    const refineData = await refineResponse.json();
-    if (!refineResponse.ok) {
-      return res.status(500).json({ error: "שגיאה בשיפור הפוסט" });
-    }
-
-    const refineText = refineData?.choices?.[0]?.message?.content || "{}";
-    const cleanRefine = refineText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-    const finalParsed = JSON.parse(cleanRefine);
-
-    res.json(finalParsed);
-
   } catch (error) {
-    res.status(500).json({ error: "שגיאה בעיבוד התמונה" });
+    res.status(500).json({ error: "שגיאה ביצירת פוסט" });
   } finally {
-    if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-    }
+    fs.unlinkSync(req.file.path);
   }
 });
 
@@ -181,71 +141,98 @@ ${parsed.post}`
 ========================= */
 
 app.post("/improve", async (req, res) => {
-  const { post, tone } = req.body;
+  const { post, tone, imageId } = req.body;
+  const deviceId = getDeviceId(req);
 
-  if (!post) {
-    return res.status(400).json({ error: "No post provided" });
+  if (!deviceId || !imageId) {
+    return res.status(400).json({ error: "Missing data" });
   }
 
-  const ip = getClientIp(req);
-  const usage = ensureUsage(ip);
+  const userRef = db.collection("users").doc(deviceId);
+  const userDoc = await userRef.get();
 
-  if (usage.improveCount >= DAILY_LIMIT_IMPROVE) {
+  if (!userDoc.exists) {
+    return res.status(404).json({ error: "User not found" });
+  }
+
+  const isAdmin = userDoc.data().isAdmin || false;
+
+  const imageRef = userRef.collection("images").doc(imageId);
+  const imageDoc = await imageRef.get();
+
+  if (!imageDoc.exists) {
+    return res.status(404).json({ error: "Image not found" });
+  }
+
+  const upgradesUsed = imageDoc.data().upgradesUsed || 0;
+
+  if (!isAdmin && upgradesUsed >= MAX_UPGRADES_PER_IMAGE) {
     return res.status(403).json({
-      error: "Free limit reached",
-      message: `הגעת למכסה היומית לשיפורים (${DAILY_LIMIT_IMPROVE}).`,
+      error: "Upgrade limit reached",
+      message: "אין יותר שדרוגים לתמונה הזו.",
     });
   }
-
-  usage.improveCount += 1;
 
   try {
     let tonePrompt = "";
 
-    if (tone === "aggressive") tonePrompt = "שכתב בסגנון מכירתי וחזק יותר";
-    if (tone === "luxury") tonePrompt = "שכתב בסגנון יוקרתי ומלוטש";
-    if (tone === "casual") tonePrompt = "שכתב בסגנון קליל וזורם";
+    if (tone === "aggressive")
+      tonePrompt = "שכתב בסגנון מכירתי וחזק יותר";
 
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o",
-        max_tokens: 600,
-        messages: [
-          {
-            role: "user",
-            content: `${tonePrompt}:
+    if (tone === "luxury")
+      tonePrompt = "שכתב בסגנון יוקרתי ומלוטש";
+
+    if (tone === "casual")
+      tonePrompt = "שכתב בסגנון קליל וזורם";
+
+    const response = await fetch(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4o",
+          max_tokens: 600,
+          messages: [
+            {
+              role: "user",
+              content: `${tonePrompt}:
 
 ${post}
 
 החזר JSON:
-{ "post": "" }`
-          },
-        ],
-      }),
-    });
+{ "post": "" }`,
+            },
+          ],
+        }),
+      }
+    );
 
     const data = await response.json();
-    if (!response.ok) {
-      return res.status(500).json({ error: "שגיאה מ-OpenAI" });
+    const text = data.choices[0].message.content
+      .replace(/```json/g, "")
+      .replace(/```/g, "")
+      .trim();
+
+    const parsed = JSON.parse(text);
+
+    if (!isAdmin) {
+      await imageRef.update({
+        upgradesUsed: admin.firestore.FieldValue.increment(1),
+      });
     }
 
-    const aiText = data?.choices?.[0]?.message?.content || "{}";
-    const cleanText = aiText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-    const parsed = JSON.parse(cleanText);
-
     res.json(parsed);
-
   } catch (error) {
     res.status(500).json({ error: "שגיאה בשיפור" });
   }
 });
 
 const PORT = process.env.PORT || 3001;
+
 app.listen(PORT, () => {
   console.log("🔥 Backend עובד על פורט", PORT);
 });
