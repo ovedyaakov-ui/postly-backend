@@ -28,7 +28,7 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
-/* 🔓 הגדלנו לימיטים כדי שלא יחסמו אותך בזמן פיתוח */
+/* 🔓 ביטול הגבלות בזמן פיתוח */
 const MAX_IMAGES = 9999;
 const MAX_UPGRADES_PER_IMAGE = 9999;
 
@@ -218,7 +218,13 @@ ${post}
       .replace(/```/g, "")
       .trim();
 
-    const parsed = JSON.parse(text);
+    let parsed;
+
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      return res.json({ post: text });
+    }
 
     if (!isAdmin) {
       await imageRef.update({
