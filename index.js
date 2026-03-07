@@ -28,8 +28,9 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
-const MAX_IMAGES = 3;
-const MAX_UPGRADES_PER_IMAGE = 3;
+/* 🔓 הגדלנו לימיטים כדי שלא יחסמו אותך בזמן פיתוח */
+const MAX_IMAGES = 9999;
+const MAX_UPGRADES_PER_IMAGE = 9999;
 
 function getDeviceId(req) {
   return req.headers["x-device-id"] || null;
