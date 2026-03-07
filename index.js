@@ -28,7 +28,7 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
-/* 🔓 ביטול הגבלות בזמן פיתוח */
+/* 🔓 ללא הגבלות בזמן פיתוח */
 const MAX_IMAGES = 9999;
 const MAX_UPGRADES_PER_IMAGE = 9999;
 
@@ -41,37 +41,36 @@ function getDeviceId(req) {
 ========================= */
 
 app.post("/analyze", upload.single("image"), async (req, res) => {
-  const deviceId = getDeviceId(req);
-  if (!deviceId) {
-    return res.status(400).json({ error: "Missing device ID" });
-  }
-
-  const userRef = db.collection("users").doc(deviceId);
-  const userDoc = await userRef.get();
-
-  let imagesUsed = 0;
-  let isAdmin = false;
-
-  if (!userDoc.exists) {
-    await userRef.set({ imagesUsed: 0, isAdmin: false });
-  } else {
-    const data = userDoc.data();
-    imagesUsed = data.imagesUsed || 0;
-    isAdmin = data.isAdmin || false;
-  }
-
-  if (!isAdmin && imagesUsed >= MAX_IMAGES) {
-    return res.status(403).json({
-      error: "Free limit reached",
-      message:
-        "סיימת את הניסיונות החינמיים. כדי להמשיך הירשם ועבור לגרסת Pro.",
-    });
-  }
-
-  const imageBuffer = fs.readFileSync(req.file.path);
-  const base64Image = imageBuffer.toString("base64");
-
   try {
+    const deviceId = getDeviceId(req);
+    if (!deviceId) {
+      return res.status(400).json({ error: "Missing device ID" });
+    }
+
+    const userRef = db.collection("users").doc(deviceId);
+    const userDoc = await userRef.get();
+
+    let imagesUsed = 0;
+    let isAdmin = false;
+
+    if (!userDoc.exists) {
+      await userRef.set({ imagesUsed: 0, isAdmin: false });
+    } else {
+      const data = userDoc.data();
+      imagesUsed = data.imagesUsed || 0;
+      isAdmin = data.isAdmin || false;
+    }
+
+    if (!isAdmin && imagesUsed >= MAX_IMAGES) {
+      return res.status(403).json({
+        error: "Free limit reached",
+        message: "סיימת את הניסיונות החינמיים.",
+      });
+    }
+
+    const imageBuffer = fs.readFileSync(req.file.path);
+    const base64Image = imageBuffer.toString("base64");
+
     const response = await fetch(
       "https://api.openai.com/v1/chat/completions",
       {
@@ -89,8 +88,7 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
               content: [
                 {
                   type: "text",
-                  text:
-                    'נתח את התמונה וכתוב פוסט מכירתי. החזר JSON: { "post": "" }',
+                  text: 'נתח את התמונה וכתוב פוסט מכירתי. החזר JSON: { "post": "" }',
                 },
                 {
                   type: "image_url",
@@ -106,12 +104,24 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
     );
 
     const data = await response.json();
+
+    if (!data.choices || !data.choices[0]) {
+      console.log("OPENAI ERROR:", data);
+      return res.status(500).json({ error: "AI error" });
+    }
+
     const text = data.choices[0].message.content
       .replace(/```json/g, "")
       .replace(/```/g, "")
       .trim();
 
-    const parsed = JSON.parse(text);
+    let parsed;
+
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = { post: text };
+    }
 
     const imageRef = userRef.collection("images").doc();
 
@@ -130,10 +140,12 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       imageId: imageRef.id,
       post: parsed.post,
     });
-  } catch (error) {
-    res.status(500).json({ error: "שגיאה ביצירת פוסט" });
-  } finally {
+
     fs.unlinkSync(req.file.path);
+
+  } catch (error) {
+    console.log("ANALYZE ERROR:", error);
+    res.status(500).json({ error: "שגיאה בעיבוד התמונה" });
   }
 });
 
@@ -142,49 +154,28 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
 ========================= */
 
 app.post("/improve", async (req, res) => {
-  const { post, tone, imageId } = req.body;
-  const deviceId = getDeviceId(req);
-
-  if (!deviceId || !imageId) {
-    return res.status(400).json({ error: "Missing data" });
-  }
-
-  const userRef = db.collection("users").doc(deviceId);
-  const userDoc = await userRef.get();
-
-  if (!userDoc.exists) {
-    return res.status(404).json({ error: "User not found" });
-  }
-
-  const isAdmin = userDoc.data().isAdmin || false;
-
-  const imageRef = userRef.collection("images").doc(imageId);
-  const imageDoc = await imageRef.get();
-
-  if (!imageDoc.exists) {
-    return res.status(404).json({ error: "Image not found" });
-  }
-
-  const upgradesUsed = imageDoc.data().upgradesUsed || 0;
-
-  if (!isAdmin && upgradesUsed >= MAX_UPGRADES_PER_IMAGE) {
-    return res.status(403).json({
-      error: "Upgrade limit reached",
-      message: "אין יותר שדרוגים לתמונה הזו.",
-    });
-  }
-
   try {
+    const { post, tone, imageId } = req.body;
+    const deviceId = getDeviceId(req);
+
+    if (!deviceId || !imageId) {
+      return res.status(400).json({ error: "Missing data" });
+    }
+
+    const userRef = db.collection("users").doc(deviceId);
+    const imageRef = userRef.collection("images").doc(imageId);
+
+    const imageDoc = await imageRef.get();
+
+    if (!imageDoc.exists) {
+      return res.status(404).json({ error: "Image not found" });
+    }
+
     let tonePrompt = "";
 
-    if (tone === "aggressive")
-      tonePrompt = "שכתב בסגנון מכירתי וחזק יותר";
-
-    if (tone === "luxury")
-      tonePrompt = "שכתב בסגנון יוקרתי ומלוטש";
-
-    if (tone === "casual")
-      tonePrompt = "שכתב בסגנון קליל וזורם";
+    if (tone === "aggressive") tonePrompt = "שכתב בסגנון מכירתי חזק יותר";
+    if (tone === "luxury") tonePrompt = "שכתב בסגנון יוקרתי ומלוטש";
+    if (tone === "casual") tonePrompt = "שכתב בסגנון קליל וזורם";
 
     const response = await fetch(
       "https://api.openai.com/v1/chat/completions",
@@ -213,6 +204,12 @@ ${post}
     );
 
     const data = await response.json();
+
+    if (!data.choices || !data.choices[0]) {
+      console.log("OPENAI ERROR:", data);
+      return res.status(500).json({ error: "AI error" });
+    }
+
     const text = data.choices[0].message.content
       .replace(/```json/g, "")
       .replace(/```/g, "")
@@ -222,18 +219,18 @@ ${post}
 
     try {
       parsed = JSON.parse(text);
-    } catch (e) {
-      return res.json({ post: text });
+    } catch {
+      parsed = { post: text };
     }
 
-    if (!isAdmin) {
-      await imageRef.update({
-        upgradesUsed: admin.firestore.FieldValue.increment(1),
-      });
-    }
+    await imageRef.update({
+      upgradesUsed: admin.firestore.FieldValue.increment(1),
+    });
 
     res.json(parsed);
+
   } catch (error) {
+    console.log("IMPROVE ERROR:", error);
     res.status(500).json({ error: "שגיאה בשיפור" });
   }
 });
