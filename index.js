@@ -16,8 +16,19 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, "uploads/");
+  },
+  filename: (req, file, cb) => {
+    const uniqueName =
+      Date.now() + "-" + Math.round(Math.random() * 1e9) + ".jpg";
+    cb(null, uniqueName);
+  },
+});
+
 const upload = multer({
-  dest: "uploads/",
+  storage,
   limits: { fileSize: 5 * 1024 * 1024 },
 });
 
@@ -28,12 +39,13 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
-/* 🔓 ללא הגבלות בזמן פיתוח */
 const MAX_IMAGES = 9999;
 const MAX_UPGRADES_PER_IMAGE = 9999;
 
+/* ===== DEVICE ID ===== */
+
 function getDeviceId(req) {
-  return req.headers["x-device-id"] || null;
+  return req.body?.deviceId || req.headers["x-device-id"] || null;
 }
 
 /* =========================
@@ -43,8 +55,13 @@ function getDeviceId(req) {
 app.post("/analyze", upload.single("image"), async (req, res) => {
   try {
     const deviceId = getDeviceId(req);
+
     if (!deviceId) {
       return res.status(400).json({ error: "Missing device ID" });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: "Missing image" });
     }
 
     const userRef = db.collection("users").doc(deviceId);
@@ -68,7 +85,7 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       });
     }
 
-    const imageBuffer = fs.readFileSync(req.file.path);
+    const imageBuffer = await fs.promises.readFile(req.file.path);
     const base64Image = imageBuffer.toString("base64");
 
     const response = await fetch(
@@ -82,6 +99,7 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
         body: JSON.stringify({
           model: "gpt-4o",
           max_tokens: 700,
+          response_format: { type: "json_object" },
           messages: [
             {
               role: "user",
@@ -103,14 +121,21 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       }
     );
 
-    const data = await response.json();
-
-    if (!data.choices || !data.choices[0]) {
-      console.log("OPENAI ERROR:", data);
-      return res.status(500).json({ error: "AI error" });
+    if (!response.ok) {
+      const err = await response.text();
+      console.error("OpenAI HTTP ERROR:", err);
+      return res.status(500).json({ error: "OpenAI request failed" });
     }
 
-    const text = data.choices[0].message.content
+    const data = await response.json();
+    const text = data?.choices?.[0]?.message?.content;
+
+    if (!text) {
+      console.error("Invalid AI response:", data);
+      return res.status(500).json({ error: "AI response invalid" });
+    }
+
+    const cleaned = text
       .replace(/```json/g, "")
       .replace(/```/g, "")
       .trim();
@@ -118,9 +143,9 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
     let parsed;
 
     try {
-      parsed = JSON.parse(text);
+      parsed = JSON.parse(cleaned);
     } catch {
-      parsed = { post: text };
+      parsed = { post: cleaned };
     }
 
     const imageRef = userRef.collection("images").doc();
@@ -141,7 +166,13 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       post: parsed.post,
     });
 
-    fs.unlinkSync(req.file.path);
+    try {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (err) {
+      console.log("File cleanup error:", err);
+    }
 
   } catch (error) {
     console.log("ANALYZE ERROR:", error);
@@ -162,6 +193,10 @@ app.post("/improve", async (req, res) => {
       return res.status(400).json({ error: "Missing data" });
     }
 
+    if (!post) {
+      return res.status(400).json({ error: "Missing post" });
+    }
+
     const userRef = db.collection("users").doc(deviceId);
     const imageRef = userRef.collection("images").doc(imageId);
 
@@ -177,6 +212,10 @@ app.post("/improve", async (req, res) => {
     if (tone === "luxury") tonePrompt = "שכתב בסגנון יוקרתי ומלוטש";
     if (tone === "casual") tonePrompt = "שכתב בסגנון קליל וזורם";
 
+    if (!tonePrompt) {
+      return res.status(400).json({ error: "Invalid tone" });
+    }
+
     const response = await fetch(
       "https://api.openai.com/v1/chat/completions",
       {
@@ -188,6 +227,7 @@ app.post("/improve", async (req, res) => {
         body: JSON.stringify({
           model: "gpt-4o",
           max_tokens: 600,
+          response_format: { type: "json_object" },
           messages: [
             {
               role: "user",
@@ -203,14 +243,21 @@ ${post}
       }
     );
 
-    const data = await response.json();
-
-    if (!data.choices || !data.choices[0]) {
-      console.log("OPENAI ERROR:", data);
-      return res.status(500).json({ error: "AI error" });
+    if (!response.ok) {
+      const err = await response.text();
+      console.error("OpenAI HTTP ERROR:", err);
+      return res.status(500).json({ error: "OpenAI request failed" });
     }
 
-    const text = data.choices[0].message.content
+    const data = await response.json();
+    const text = data?.choices?.[0]?.message?.content;
+
+    if (!text) {
+      console.error("Invalid AI response:", data);
+      return res.status(500).json({ error: "AI response invalid" });
+    }
+
+    const cleaned = text
       .replace(/```json/g, "")
       .replace(/```/g, "")
       .trim();
@@ -218,9 +265,9 @@ ${post}
     let parsed;
 
     try {
-      parsed = JSON.parse(text);
+      parsed = JSON.parse(cleaned);
     } catch {
-      parsed = { post: text };
+      parsed = { post: cleaned };
     }
 
     await imageRef.update({
