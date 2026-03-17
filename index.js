@@ -42,8 +42,6 @@ if (!OPENAI_API_KEY) {
 const MAX_IMAGES = 9999;
 const MAX_UPGRADES_PER_IMAGE = 9999;
 
-/* ===== DEVICE ID ===== */
-
 function getDeviceId(req) {
   return req.body?.deviceId || req.headers["x-device-id"] || null;
 }
@@ -129,10 +127,11 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
 
     const data = await response.json();
 
-    // 🔥 תיקון קריטי
-    const text = typeof data?.choices?.[0]?.message?.content === "string"
-      ? data.choices[0].message.content
-      : JSON.stringify(data?.choices?.[0]?.message?.content);
+    const rawContent = data?.choices?.[0]?.message?.content;
+    const text =
+      typeof rawContent === "string"
+        ? rawContent
+        : JSON.stringify(rawContent ?? "");
 
     if (!text) {
       console.error("Invalid AI response:", data);
@@ -148,6 +147,10 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
 
     try {
       parsed = JSON.parse(cleaned);
+
+      if (!parsed || typeof parsed !== "object" || !parsed.post) {
+        parsed = { post: cleaned };
+      }
     } catch {
       parsed = { post: cleaned };
     }
@@ -177,7 +180,6 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
     } catch (err) {
       console.log("File cleanup error:", err);
     }
-
   } catch (error) {
     console.log("ANALYZE ERROR:", error);
     res.status(500).json({ error: "שגיאה בעיבוד התמונה" });
@@ -255,10 +257,11 @@ ${post}
 
     const data = await response.json();
 
-    // 🔥 גם כאן אותו תיקון
-    const text = typeof data?.choices?.[0]?.message?.content === "string"
-      ? data.choices[0].message.content
-      : JSON.stringify(data?.choices?.[0]?.message?.content);
+    const rawContent = data?.choices?.[0]?.message?.content;
+    const text =
+      typeof rawContent === "string"
+        ? rawContent
+        : JSON.stringify(rawContent ?? "");
 
     if (!text) {
       console.error("Invalid AI response:", data);
@@ -274,6 +277,10 @@ ${post}
 
     try {
       parsed = JSON.parse(cleaned);
+
+      if (!parsed || typeof parsed !== "object" || !parsed.post) {
+        parsed = { post: cleaned };
+      }
     } catch {
       parsed = { post: cleaned };
     }
@@ -283,7 +290,6 @@ ${post}
     });
 
     res.json(parsed);
-
   } catch (error) {
     console.log("IMPROVE ERROR:", error);
     res.status(500).json({ error: "שגיאה בשיפור" });
