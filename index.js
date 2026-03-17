@@ -128,7 +128,11 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
     }
 
     const data = await response.json();
-    const text = data?.choices?.[0]?.message?.content;
+
+    // 🔥 תיקון קריטי
+    const text = typeof data?.choices?.[0]?.message?.content === "string"
+      ? data.choices[0].message.content
+      : JSON.stringify(data?.choices?.[0]?.message?.content);
 
     if (!text) {
       console.error("Invalid AI response:", data);
@@ -250,7 +254,11 @@ ${post}
     }
 
     const data = await response.json();
-    const text = data?.choices?.[0]?.message?.content;
+
+    // 🔥 גם כאן אותו תיקון
+    const text = typeof data?.choices?.[0]?.message?.content === "string"
+      ? data.choices[0].message.content
+      : JSON.stringify(data?.choices?.[0]?.message?.content);
 
     if (!text) {
       console.error("Invalid AI response:", data);
