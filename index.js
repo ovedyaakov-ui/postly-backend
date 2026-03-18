@@ -4,10 +4,7 @@ import cors from "cors";
 import fs from "fs";
 import fetch from "node-fetch";
 import admin from "firebase-admin";
-import { createRequire } from "module";
- 
-const require = createRequire(import.meta.url);
-const serviceAccount = require("/etc/secrets/serviceAccountKey.json");
+import serviceAccount from "./serviceAccountKey.json" with { type: "json" };
  
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
