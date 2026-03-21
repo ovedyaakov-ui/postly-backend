@@ -55,7 +55,7 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
             content: [
               {
                 type: "text",
-                text: 'נתח את התמונה וכתוב פוסט מכירתי. החזר JSON: { "post": "" }',
+                text: 'נתח את התמונה וכתוב פוסט מכירתי עשיר באימוג\'ים וסגנון מרתק. השתמש באימוג\'ים רלוונטיים בכל הפוסט, כתוב בשפה חיה ומושכת עם אנרגיה גבוהה, והוסף קריאה לפעולה חזקה בסוף. החזר JSON: { "post": "" }',
               },
               {
                 type: "image_url",
@@ -120,9 +120,9 @@ app.post("/improve", async (req, res) => {
     }
 
     let tonePrompt = "";
-    if (tone === "aggressive") tonePrompt = "שכתב בסגנון מכירתי חזק יותר";
-    if (tone === "luxury") tonePrompt = "שכתב בסגנון יוקרתי ומלוטש";
-    if (tone === "casual") tonePrompt = "שכתב בסגנון קליל וזורם";
+    if (tone === "aggressive") tonePrompt = "שכתב בסגנון מכירתי חזק יותר עם אנרגיה גבוהה ואימוג'ים";
+    if (tone === "luxury") tonePrompt = "שכתב בסגנון יוקרתי ומלוטש עם אימוג'ים אלגנטיים";
+    if (tone === "casual") tonePrompt = "שכתב בסגנון קליל וזורם עם אימוג'ים כיפיים";
 
     if (!tonePrompt) {
       return res.status(400).json({ error: "Invalid tone" });
