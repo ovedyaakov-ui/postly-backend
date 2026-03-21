@@ -4,10 +4,11 @@ import cors from "cors";
 import fs from "fs";
 import fetch from "node-fetch";
 import admin from "firebase-admin";
-import { createRequire } from "module";
 
-const require = createRequire(import.meta.url);
-const serviceAccount = require("./serviceAccountKey.json");
+/* 🔥 קריאה מ-Render Secret Files */
+const serviceAccount = JSON.parse(
+  fs.readFileSync("/etc/secrets/serviceAccountKey.json", "utf8")
+);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -20,14 +21,9 @@ app.use(cors());
 app.use(express.json());
 
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, "uploads/");
-  },
-  filename: (req, file, cb) => {
-    const uniqueName =
-      Date.now() + "-" + Math.round(Math.random() * 1e9) + ".jpg";
-    cb(null, uniqueName);
-  },
+  destination: (req, file, cb) => cb(null, "uploads/"),
+  filename: (req, file, cb) =>
+    cb(null, Date.now() + "-" + Math.round(Math.random() * 1e9) + ".jpg"),
 });
 
 const upload = multer({
@@ -42,100 +38,66 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
-const MAX_IMAGES = 9999;
-const MAX_UPGRADES_PER_IMAGE = 9999;
-
 function getDeviceId(req) {
   return req.body?.deviceId || req.headers["x-device-id"] || null;
 }
+
+/* =========================
+   ANALYZE
+========================= */
 
 app.post("/analyze", upload.single("image"), async (req, res) => {
   try {
     const deviceId = getDeviceId(req);
 
-    if (!deviceId) {
-      return res.status(400).json({ error: "Missing device ID" });
-    }
-
-    if (!req.file) {
-      return res.status(400).json({ error: "Missing image" });
-    }
+    if (!deviceId) return res.status(400).json({ error: "Missing device ID" });
+    if (!req.file) return res.status(400).json({ error: "Missing image" });
 
     const userRef = db.collection("users").doc(deviceId);
     const userDoc = await userRef.get();
 
-    let imagesUsed = 0;
-    let isAdmin = false;
-
     if (!userDoc.exists) {
       await userRef.set({ imagesUsed: 0, isAdmin: false });
-    } else {
-      const data = userDoc.data();
-      imagesUsed = data.imagesUsed || 0;
-      isAdmin = data.isAdmin || false;
-    }
-
-    if (!isAdmin && imagesUsed >= MAX_IMAGES) {
-      return res.status(403).json({
-        error: "Free limit reached",
-        message: "סיימת את הניסיונות החינמיים.",
-      });
     }
 
     const imageBuffer = await fs.promises.readFile(req.file.path);
     const base64Image = imageBuffer.toString("base64");
 
-    const response = await fetch(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "gpt-4o",
-          max_tokens: 700,
-          response_format: { type: "json_object" },
-          messages: [
-            {
-              role: "user",
-              content: [
-                {
-                  type: "text",
-                  text: 'נתח את התמונה וכתוב פוסט מכירתי. החזר JSON: { "post": "" }',
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        max_tokens: 700,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: 'נתח את התמונה וכתוב פוסט מכירתי. החזר JSON: { "post": "" }',
+              },
+              {
+                type: "image_url",
+                image_url: {
+                  url: `data:image/jpeg;base64,${base64Image}`,
                 },
-                {
-                  type: "image_url",
-                  image_url: {
-                    url: `data:image/jpeg;base64,${base64Image}`,
-                  },
-                },
-              ],
-            },
-          ],
-        }),
-      }
-    );
-
-    if (!response.ok) {
-      const err = await response.text();
-      console.error("OpenAI HTTP ERROR:", err);
-      return res.status(500).json({ error: "OpenAI request failed" });
-    }
+              },
+            ],
+          },
+        ],
+      }),
+    });
 
     const data = await response.json();
 
-    const rawContent = data?.choices?.[0]?.message?.content;
+    const raw = data?.choices?.[0]?.message?.content;
     const text =
-      typeof rawContent === "string"
-        ? rawContent
-        : JSON.stringify(rawContent ?? "");
-
-    if (!text) {
-      console.error("Invalid AI response:", data);
-      return res.status(500).json({ error: "AI response invalid" });
-    }
+      typeof raw === "string" ? raw : JSON.stringify(raw ?? "");
 
     const cleaned = text
       .replace(/```json/g, "")
@@ -146,10 +108,7 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
 
     try {
       parsed = JSON.parse(cleaned);
-
-      if (!parsed || typeof parsed !== "object" || !parsed.post) {
-        parsed = { post: cleaned };
-      }
+      if (!parsed.post) parsed = { post: cleaned };
     } catch {
       parsed = { post: cleaned };
     }
@@ -161,107 +120,64 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    if (!isAdmin) {
-      await userRef.update({
-        imagesUsed: admin.firestore.FieldValue.increment(1),
-      });
-    }
-
     res.json({
       imageId: imageRef.id,
       post: parsed.post,
     });
 
-    try {
-      if (req.file && fs.existsSync(req.file.path)) {
-        fs.unlinkSync(req.file.path);
-      }
-    } catch (err) {
-      console.log("File cleanup error:", err);
-    }
   } catch (error) {
     console.log("ANALYZE ERROR:", error);
     res.status(500).json({ error: "שגיאה בעיבוד התמונה" });
   }
 });
 
+/* =========================
+   IMPROVE
+========================= */
+
 app.post("/improve", async (req, res) => {
   try {
     const { post, tone, imageId } = req.body;
     const deviceId = getDeviceId(req);
 
-    if (!deviceId || !imageId) {
+    if (!deviceId || !imageId)
       return res.status(400).json({ error: "Missing data" });
-    }
 
-    if (!post) {
-      return res.status(400).json({ error: "Missing post" });
-    }
+    const toneMap = {
+      aggressive: "שכתב בסגנון מכירתי חזק יותר",
+      luxury: "שכתב בסגנון יוקרתי ומלוטש",
+      casual: "שכתב בסגנון קליל וזורם",
+    };
 
-    const userRef = db.collection("users").doc(deviceId);
-    const imageRef = userRef.collection("images").doc(imageId);
-
-    const imageDoc = await imageRef.get();
-
-    if (!imageDoc.exists) {
-      return res.status(404).json({ error: "Image not found" });
-    }
-
-    let tonePrompt = "";
-
-    if (tone === "aggressive") tonePrompt = "שכתב בסגנון מכירתי חזק יותר";
-    if (tone === "luxury") tonePrompt = "שכתב בסגנון יוקרתי ומלוטש";
-    if (tone === "casual") tonePrompt = "שכתב בסגנון קליל וזורם";
-
-    if (!tonePrompt) {
-      return res.status(400).json({ error: "Invalid tone" });
-    }
-
-    const response = await fetch(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "gpt-4o",
-          max_tokens: 600,
-          response_format: { type: "json_object" },
-          messages: [
-            {
-              role: "user",
-              content: `${tonePrompt}:
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        max_tokens: 600,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "user",
+            content: `${toneMap[tone] || ""}:
 
 ${post}
 
 החזר JSON:
 { "post": "" }`,
-            },
-          ],
-        }),
-      }
-    );
-
-    if (!response.ok) {
-      const err = await response.text();
-      console.error("OpenAI HTTP ERROR:", err);
-      return res.status(500).json({ error: "OpenAI request failed" });
-    }
+          },
+        ],
+      }),
+    });
 
     const data = await response.json();
 
-    const rawContent = data?.choices?.[0]?.message?.content;
+    const raw = data?.choices?.[0]?.message?.content;
     const text =
-      typeof rawContent === "string"
-        ? rawContent
-        : JSON.stringify(rawContent ?? "");
-
-    if (!text) {
-      console.error("Invalid AI response:", data);
-      return res.status(500).json({ error: "AI response invalid" });
-    }
+      typeof raw === "string" ? raw : JSON.stringify(raw ?? "");
 
     const cleaned = text
       .replace(/```json/g, "")
@@ -272,19 +188,13 @@ ${post}
 
     try {
       parsed = JSON.parse(cleaned);
-
-      if (!parsed || typeof parsed !== "object" || !parsed.post) {
-        parsed = { post: cleaned };
-      }
+      if (!parsed.post) parsed = { post: cleaned };
     } catch {
       parsed = { post: cleaned };
     }
 
-    await imageRef.update({
-      upgradesUsed: admin.firestore.FieldValue.increment(1),
-    });
-
     res.json(parsed);
+
   } catch (error) {
     console.log("IMPROVE ERROR:", error);
     res.status(500).json({ error: "שגיאה בשיפור" });
