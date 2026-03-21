@@ -3,27 +3,19 @@ import multer from "multer";
 import cors from "cors";
 import fs from "fs";
 import fetch from "node-fetch";
-import admin from "firebase-admin";
-
-/* 🔥 קריאה מ-Render Secret Files */
-const serviceAccount = JSON.parse(
-  fs.readFileSync("/etc/secrets/serviceAccountKey.json", "utf8")
-);
-
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
-
-const db = admin.firestore();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, "uploads/"),
-  filename: (req, file, cb) =>
-    cb(null, Date.now() + "-" + Math.round(Math.random() * 1e9) + ".jpg"),
+  destination: (req, file, cb) => {
+    cb(null, "uploads/");
+  },
+  filename: (req, file, cb) => {
+    const uniqueName = Date.now() + "-" + Math.round(Math.random() * 1e9) + ".jpg";
+    cb(null, uniqueName);
+  },
 });
 
 const upload = multer({
@@ -38,26 +30,10 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
-function getDeviceId(req) {
-  return req.body?.deviceId || req.headers["x-device-id"] || null;
-}
-
-/* =========================
-   ANALYZE
-========================= */
-
 app.post("/analyze", upload.single("image"), async (req, res) => {
   try {
-    const deviceId = getDeviceId(req);
-
-    if (!deviceId) return res.status(400).json({ error: "Missing device ID" });
-    if (!req.file) return res.status(400).json({ error: "Missing image" });
-
-    const userRef = db.collection("users").doc(deviceId);
-    const userDoc = await userRef.get();
-
-    if (!userDoc.exists) {
-      await userRef.set({ imagesUsed: 0, isAdmin: false });
+    if (!req.file) {
+      return res.status(400).json({ error: "Missing image" });
     }
 
     const imageBuffer = await fs.promises.readFile(req.file.path);
@@ -93,61 +69,64 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       }),
     });
 
+    if (!response.ok) {
+      const err = await response.text();
+      console.error("OpenAI HTTP ERROR:", err);
+      return res.status(500).json({ error: "OpenAI request failed" });
+    }
+
     const data = await response.json();
+    const rawContent = data?.choices?.[0]?.message?.content;
+    const text = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent ?? "");
 
-    const raw = data?.choices?.[0]?.message?.content;
-    const text =
-      typeof raw === "string" ? raw : JSON.stringify(raw ?? "");
+    if (!text) {
+      console.error("Invalid AI response:", data);
+      return res.status(500).json({ error: "AI response invalid" });
+    }
 
-    const cleaned = text
-      .replace(/```json/g, "")
-      .replace(/```/g, "")
-      .trim();
+    const cleaned = text.replace(/```json/g, "").replace(/```/g, "").trim();
 
     let parsed;
-
     try {
       parsed = JSON.parse(cleaned);
-      if (!parsed.post) parsed = { post: cleaned };
+      if (!parsed || typeof parsed !== "object" || !parsed.post) {
+        parsed = { post: cleaned };
+      }
     } catch {
       parsed = { post: cleaned };
     }
 
-    const imageRef = userRef.collection("images").doc();
+    res.json({ post: parsed.post });
 
-    await imageRef.set({
-      upgradesUsed: 0,
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    res.json({
-      imageId: imageRef.id,
-      post: parsed.post,
-    });
-
+    try {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (err) {
+      console.log("File cleanup error:", err);
+    }
   } catch (error) {
     console.log("ANALYZE ERROR:", error);
     res.status(500).json({ error: "שגיאה בעיבוד התמונה" });
   }
 });
 
-/* =========================
-   IMPROVE
-========================= */
-
 app.post("/improve", async (req, res) => {
   try {
-    const { post, tone, imageId } = req.body;
-    const deviceId = getDeviceId(req);
+    const { post, tone } = req.body;
 
-    if (!deviceId || !imageId)
-      return res.status(400).json({ error: "Missing data" });
+    if (!post) {
+      return res.status(400).json({ error: "Missing post" });
+    }
 
-    const toneMap = {
-      aggressive: "שכתב בסגנון מכירתי חזק יותר",
-      luxury: "שכתב בסגנון יוקרתי ומלוטש",
-      casual: "שכתב בסגנון קליל וזורם",
-    };
+    let tonePrompt = "";
+    if (tone === "aggressive") tonePrompt = "שכתב בסגנון מכירתי חזק יותר";
+    if (tone === "luxury") tonePrompt = "שכתב בסגנון יוקרתי ומלוטש";
+    if (tone === "casual") tonePrompt = "שכתב בסגנון קליל וזורם";
+
+    if (!tonePrompt) {
+      return res.status(400).json({ error: "Invalid tone" });
+    }
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -162,7 +141,7 @@ app.post("/improve", async (req, res) => {
         messages: [
           {
             role: "user",
-            content: `${toneMap[tone] || ""}:
+            content: `${tonePrompt}:
 
 ${post}
 
@@ -173,28 +152,34 @@ ${post}
       }),
     });
 
+    if (!response.ok) {
+      const err = await response.text();
+      console.error("OpenAI HTTP ERROR:", err);
+      return res.status(500).json({ error: "OpenAI request failed" });
+    }
+
     const data = await response.json();
+    const rawContent = data?.choices?.[0]?.message?.content;
+    const text = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent ?? "");
 
-    const raw = data?.choices?.[0]?.message?.content;
-    const text =
-      typeof raw === "string" ? raw : JSON.stringify(raw ?? "");
+    if (!text) {
+      console.error("Invalid AI response:", data);
+      return res.status(500).json({ error: "AI response invalid" });
+    }
 
-    const cleaned = text
-      .replace(/```json/g, "")
-      .replace(/```/g, "")
-      .trim();
+    const cleaned = text.replace(/```json/g, "").replace(/```/g, "").trim();
 
     let parsed;
-
     try {
       parsed = JSON.parse(cleaned);
-      if (!parsed.post) parsed = { post: cleaned };
+      if (!parsed || typeof parsed !== "object" || !parsed.post) {
+        parsed = { post: cleaned };
+      }
     } catch {
       parsed = { post: cleaned };
     }
 
     res.json(parsed);
-
   } catch (error) {
     console.log("IMPROVE ERROR:", error);
     res.status(500).json({ error: "שגיאה בשיפור" });
@@ -202,7 +187,6 @@ ${post}
 });
 
 const PORT = process.env.PORT || 3001;
-
 app.listen(PORT, () => {
   console.log("🔥 Backend עובד על פורט", PORT);
 });
