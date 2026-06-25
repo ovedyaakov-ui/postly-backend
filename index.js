@@ -49,7 +49,7 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       },
       body: JSON.stringify({
         model: "gpt-4o",
-        max_tokens: 200,
+        max_tokens: 300,
         response_format: { type: "json_object" },
         messages: [
           {
@@ -62,7 +62,9 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
   "category": "restaurant|food_product|pet|gaming|cosmetics|professional_service|vehicle|judaica|sports|children|fashion|general",
   "description": "תיאור קצר של מה שרואים",
   "targetAudience": "קהל היעד",
-  "brand": "שם המותג אם נראה בתמונה או null"
+  "businessName": "שם העסק אם נראה בבירור בתמונה, אחרת null",
+  "productName": "שם המוצר אם נראה בבירור בתמונה, אחרת null",
+  "brand": "שם המותג אם נראה בבירור בתמונה, אחרת null"
 }`
               },
               {
@@ -83,32 +85,52 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
     try {
       vision = JSON.parse(visionText);
     } catch {
-      vision = { category: "general", description: "", targetAudience: "כללי", brand: null };
+      vision = { category: "general", description: "", targetAudience: "כללי", businessName: null, productName: null, brand: null };
     }
 
     // שלב 2 — בחירת אסטרטגיה
     const category = vision.category || "general";
     const strategy = strategies[category] || strategies.general;
 
+    // בניית כותרת חכמה
+    const hook = strategy.hooks[Math.floor(Math.random() * strategy.hooks.length)];
+    const cta = strategy.cta[Math.floor(Math.random() * strategy.cta.length)];
+    const emojis = strategy.emoji.join(" ");
+
+    let titleHint = "";
+    if (vision.businessName) {
+      titleHint = `שם העסק: ${vision.businessName} — השתמש בו בכותרת הפוסט.`;
+    } else if (vision.productName) {
+      titleHint = `שם המוצר: ${vision.productName} — השתמש בו בכותרת הפוסט.`;
+    } else if (vision.brand) {
+      titleHint = `מותג: ${vision.brand} — אפשר להשתמש בו בכותרת.`;
+    } else {
+      titleHint = `לא זוהה שם ספציפי — כתוב כותרת לפי סוג המוצר בלבד.`;
+    }
+
     // שלב 3 — כתיבת הפוסט
     const postPrompt = `אתה קופירייטר מקצועי.
 
 המוצר: ${vision.description}
-${vision.brand ? `מותג: ${vision.brand}` : ""}
 קהל יעד: ${vision.targetAudience}
 סגנון: ${strategy.tone}
 רגשות להדגיש: ${strategy.emotions.join(", ")}
 גישה: ${strategy.approach}
 אסור לכתוב: ${strategy.forbidden.join(", ")}
+אימוג'ים מומלצים: ${emojis}
+
+הנחיית כותרת: ${titleHint}
+פתיחה מומלצת: ${hook}
+קריאה לפעולה: ${cta}
 
 כתוב פוסט שיווקי בעברית:
-- פתח במשפט שעוצר את הגלילה
-- 2-3 פסקאות שמדברות אל הלקוח
-- השתמש באימוג'ים בצורה חכמה
+- התחל עם כותרת חזקה לפי הנחיית הכותרת למעלה
+- המשך עם 2-3 פסקאות שמדברות אל הלקוח
+- השתמש באימוג'ים בצורה חכמה ומותאמת
 - אל תמציא מחיר, מבצע או הנחה
 - אל תכתוב "בתמונה רואים"
 - כתוב בעברית טבעית שנשמעת כאילו בן אדם כתב
-- סיים בקריאה לפעולה
+- סיים עם קריאה לפעולה
 
 החזר JSON בלבד: { "post": "" }`;
 
