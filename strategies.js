@@ -73,4 +73,4 @@ const strategies = {
   }
 };
 
-module.exports = strategies;
+export default strategies;
