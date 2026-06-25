@@ -3,10 +3,7 @@ import multer from "multer";
 import cors from "cors";
 import fs from "fs";
 import fetch from "node-fetch";
-import { createRequire } from "module";
-
-const require = createRequire(import.meta.url);
-const strategies = require("./strategies.js");
+import strategies from "./strategies.js";
 
 const app = express();
 app.use(cors());
