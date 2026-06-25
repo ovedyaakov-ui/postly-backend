@@ -3,6 +3,10 @@ import multer from "multer";
 import cors from "cors";
 import fs from "fs";
 import fetch from "node-fetch";
+import { createRequire } from "module";
+
+const require = createRequire(import.meta.url);
+const strategies = require("./strategies.js");
 
 const app = express();
 app.use(cors());
@@ -39,7 +43,8 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
     const imageBuffer = await fs.promises.readFile(req.file.path);
     const base64Image = imageBuffer.toString("base64");
 
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    // שלב 1 — זיהוי התמונה
+    const visionResponse = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -47,7 +52,7 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       },
       body: JSON.stringify({
         model: "gpt-4o",
-        max_tokens: 1000,
+        max_tokens: 200,
         response_format: { type: "json_object" },
         messages: [
           {
@@ -55,43 +60,13 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
             content: [
               {
                 type: "text",
-                text: `אתה קופירייטר מקצועי בכיר עם ניסיון של 15 שנה בשיווק דיגיטלי.
-
-עבוד בשלושה שלבים פנימיים לפני שאתה כותב את הפוסט:
-
-שלב 1 — זיהוי:
-- מה המוצר או השירות המרכזי בתמונה?
-- איזה סוג עסק זה? (מסעדה, חנות, מוצר, שירות, עסק מקצועי וכו')
-- מי קהל היעד הסביר? (משפחות, צעירים, אנשי מקצוע, הורים, ילדים וכו')
-
-שלב 2 — אסטרטגיה:
-בחר את גישת המכירה המתאימה ביותר למוצר:
-- רגש (מתאים למזון, ילדים, חיות, מתנות)
-- איכות ומקצועיות (מתאים לשירותים, מוצרים יוקרתיים)
-- חוויה (מתאים למסעדות, אטרקציות, בידור)
-- פתרון לבעיה (מתאים לשירותים מקצועיים, מוצרי טיפוח)
-- קהילה והשתייכות (מתאים לחנויות מקומיות, עסקים שכונתיים)
-
-שלב 3 — כתיבה:
-כתוב פוסט שיווקי בעברית שמותאם לסוג העסק ולגישת המכירה שבחרת.
-
-חוקים לכתיבה:
-- פתח במשפט שתופס את העין מיד — שאלה, עובדה מפתיעה, או משפט שמדבר ישירות ללקוח.
-- כתוב 2-3 פסקאות שיווקיות שמדברות אל הלקוח ולא על המוצר.
-- השתמש בפסיכולוגיית מכירה: FOMO, חיבור רגשי, תחושת ערך.
-- כל פוסט חייב להישמע שונה מהפוסט הקודם — אל תשתמש באותה פתיחה.
-- כתוב בעברית שנשמעת כאילו בן אדם כתב אותה, לא AI.
-- השתמש באימוג'ים בצורה חכמה ומותאמת לסוג העסק.
-- סיים בקריאה לפעולה שגורמת לאנשים להגיב, לשלוח הודעה או לבקר.
-
-אסור בהחלט:
-- לא להמציא מחיר, מבצע, הנחה, משלוח או אחריות.
-- לא לכתוב "בתמונה רואים" או לתאר את התמונה.
-- לא להשתמש בקלישאות: "הדור הבא", "הפתרון האולטימטיבי", "אל תחכה יותר", "מהפכה".
-- לא לחזור על אותם משפטים גנריים בכל פוסט.
-
-החזר תמיד JSON תקין בלבד:
-{ "post": "" }`,
+                text: `נתח את התמונה והחזר JSON בלבד:
+{
+  "category": "restaurant|food_product|pet|gaming|cosmetics|professional_service|vehicle|judaica|sports|children|fashion|general",
+  "description": "תיאור קצר של מה שרואים",
+  "targetAudience": "קהל היעד",
+  "brand": "שם המותג אם נראה בתמונה או null"
+}`
               },
               {
                 type: "image_url",
@@ -105,34 +80,140 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       }),
     });
 
-    if (!response.ok) {
-      const err = await response.text();
-      console.error("OpenAI HTTP ERROR:", err);
-      return res.status(500).json({ error: "OpenAI request failed" });
-    }
-
-    const data = await response.json();
-    const rawContent = data?.choices?.[0]?.message?.content;
-    const text = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent ?? "");
-
-    if (!text) {
-      console.error("Invalid AI response:", data);
-      return res.status(500).json({ error: "AI response invalid" });
-    }
-
-    const cleaned = text.replace(/```json/g, "").replace(/```/g, "").trim();
-
-    let parsed;
+    const visionData = await visionResponse.json();
+    const visionText = visionData?.choices?.[0]?.message?.content;
+    let vision;
     try {
-      parsed = JSON.parse(cleaned);
-      if (!parsed || typeof parsed !== "object" || !parsed.post) {
-        parsed = { post: cleaned };
-      }
+      vision = JSON.parse(visionText);
     } catch {
-      parsed = { post: cleaned };
+      vision = { category: "general", description: "", targetAudience: "כללי", brand: null };
     }
 
-    res.json({ post: parsed.post });
+    // שלב 2 — בחירת אסטרטגיה
+    const category = vision.category || "general";
+    const strategy = strategies[category] || strategies.general;
+
+    // שלב 3 — כתיבת הפוסט
+    const postPrompt = `אתה קופירייטר מקצועי.
+
+המוצר: ${vision.description}
+${vision.brand ? `מותג: ${vision.brand}` : ""}
+קהל יעד: ${vision.targetAudience}
+סגנון: ${strategy.tone}
+רגשות להדגיש: ${strategy.emotions.join(", ")}
+גישה: ${strategy.approach}
+אסור לכתוב: ${strategy.forbidden.join(", ")}
+
+כתוב פוסט שיווקי בעברית:
+- פתח במשפט שעוצר את הגלילה
+- 2-3 פסקאות שמדברות אל הלקוח
+- השתמש באימוג'ים בצורה חכמה
+- אל תמציא מחיר, מבצע או הנחה
+- אל תכתוב "בתמונה רואים"
+- כתוב בעברית טבעית שנשמעת כאילו בן אדם כתב
+- סיים בקריאה לפעולה
+
+החזר JSON בלבד: { "post": "" }`;
+
+    const writeResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        max_tokens: 1000,
+        response_format: { type: "json_object" },
+        messages: [{ role: "user", content: postPrompt }],
+      }),
+    });
+
+    const writeData = await writeResponse.json();
+    const writeText = writeData?.choices?.[0]?.message?.content;
+    let written;
+    try {
+      written = JSON.parse(writeText);
+    } catch {
+      written = { post: writeText };
+    }
+
+    // שלב 4 — בדיקה עצמית ושכתוב אם צריך
+    const reviewPrompt = `קרא את הפוסט הבא ודרג אותו:
+
+${written.post}
+
+החזר JSON בלבד:
+{
+  "hook": 0-10,
+  "naturalness": 0-10,
+  "sales": 0-10,
+  "overall": 0-10,
+  "rewrite": true/false
+}
+
+rewrite יהיה true רק אם overall נמוך מ-8.`;
+
+    const reviewResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        max_tokens: 200,
+        response_format: { type: "json_object" },
+        messages: [{ role: "user", content: reviewPrompt }],
+      }),
+    });
+
+    const reviewData = await reviewResponse.json();
+    const reviewText = reviewData?.choices?.[0]?.message?.content;
+    let review;
+    try {
+      review = JSON.parse(reviewText);
+    } catch {
+      review = { rewrite: false };
+    }
+
+    let finalPost = written.post;
+
+    if (review.rewrite) {
+      const rewriteResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4o",
+          max_tokens: 1000,
+          response_format: { type: "json_object" },
+          messages: [
+            {
+              role: "user",
+              content: `שפר את הפוסט הבא. גרום לו להיות יותר טבעי, מושך ומכירתי:
+
+${written.post}
+
+החזר JSON בלבד: { "post": "" }`
+            }
+          ],
+        }),
+      });
+
+      const rewriteData = await rewriteResponse.json();
+      const rewriteText = rewriteData?.choices?.[0]?.message?.content;
+      try {
+        const rewritten = JSON.parse(rewriteText);
+        finalPost = rewritten.post || finalPost;
+      } catch {
+        // נשאר עם הפוסט המקורי
+      }
+    }
+
+    res.json({ post: finalPost });
 
     try {
       if (req.file && fs.existsSync(req.file.path)) {
@@ -188,21 +269,9 @@ ${post}
       }),
     });
 
-    if (!response.ok) {
-      const err = await response.text();
-      console.error("OpenAI HTTP ERROR:", err);
-      return res.status(500).json({ error: "OpenAI request failed" });
-    }
-
     const data = await response.json();
     const rawContent = data?.choices?.[0]?.message?.content;
     const text = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent ?? "");
-
-    if (!text) {
-      console.error("Invalid AI response:", data);
-      return res.status(500).json({ error: "AI response invalid" });
-    }
-
     const cleaned = text.replace(/```json/g, "").replace(/```/g, "").trim();
 
     let parsed;
