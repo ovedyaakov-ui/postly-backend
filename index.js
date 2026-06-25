@@ -60,7 +60,8 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
                 text: `נתח את התמונה והחזר JSON בלבד:
 {
   "category": "restaurant|food_product|pet|gaming|cosmetics|professional_service|vehicle|judaica|sports|children|fashion|general",
-  "description": "תיאור קצר של מה שרואים",
+  "description": "תיאור קצר של מה שרואים בבירור בתמונה בלבד",
+  "detectedItems": "רשימה של מוצרים או פריטים שנראים בבירור בתמונה",
   "targetAudience": "קהל היעד",
   "businessName": "שם העסק אם נראה בבירור בתמונה, אחרת null",
   "productName": "שם המוצר אם נראה בבירור בתמונה, אחרת null",
@@ -85,14 +86,13 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
     try {
       vision = JSON.parse(visionText);
     } catch {
-      vision = { category: "general", description: "", targetAudience: "כללי", businessName: null, productName: null, brand: null };
+      vision = { category: "general", description: "", detectedItems: "", targetAudience: "כללי", businessName: null, productName: null, brand: null };
     }
 
     // שלב 2 — בחירת אסטרטגיה
     const category = vision.category || "general";
     const strategy = strategies[category] || strategies.general;
 
-    // בניית כותרת חכמה
     const hook = strategy.hooks[Math.floor(Math.random() * strategy.hooks.length)];
     const cta = strategy.cta[Math.floor(Math.random() * strategy.cta.length)];
     const emojis = strategy.emoji.join(" ");
@@ -112,6 +112,7 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
     const postPrompt = `אתה קופירייטר מקצועי.
 
 המוצר: ${vision.description}
+פריטים שנראים בבירור בתמונה: ${vision.detectedItems}
 קהל יעד: ${vision.targetAudience}
 סגנון: ${strategy.tone}
 רגשות להדגיש: ${strategy.emotions.join(", ")}
@@ -124,8 +125,9 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
 קריאה לפעולה: ${cta}
 
 כתוב פוסט שיווקי בעברית:
-- התחל עם כותרת חזקה לפי הנחיית הכותרת למעלה
+- התחל עם כותרת חזקה לפי הנחיית הכותרת
 - המשך עם 2-3 פסקאות שמדברות אל הלקוח
+- כתוב רק על מה שזוהה בתמונה — אל תמציא מוצרים ספציפיים שלא נראים בבירור
 - השתמש באימוג'ים בצורה חכמה ומותאמת
 - אל תמציא מחיר, מבצע או הנחה
 - אל תכתוב "בתמונה רואים"
