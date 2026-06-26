@@ -40,7 +40,6 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
     const imageBuffer = await fs.promises.readFile(req.file.path);
     const base64Image = imageBuffer.toString("base64");
 
-    // שלב 1 — זיהוי התמונה
     const visionResponse = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -89,7 +88,6 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       vision = { category: "general", description: "", detectedItems: "", targetAudience: "כללי", businessName: null, productName: null, brand: null };
     }
 
-    // שלב 2 — בחירת אסטרטגיה
     const category = vision.category || "general";
     const strategy = strategies[category] || strategies.general;
 
@@ -108,7 +106,6 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       titleHint = `לא זוהה שם ספציפי — כתוב כותרת לפי סוג המוצר בלבד.`;
     }
 
-    // שלב 3 — כתיבת הפוסט
     const postPrompt = `אתה קופירייטר מקצועי.
 
 המוצר: ${vision.description}
@@ -159,7 +156,6 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       written = { post: writeText };
     }
 
-    // שלב 4 — בדיקה עצמית ושכתוב אם צריך
     const reviewPrompt = `קרא את הפוסט הבא ודרג אותו:
 
 ${written.post}
@@ -229,9 +225,7 @@ ${written.post}
       try {
         const rewritten = JSON.parse(rewriteText);
         finalPost = rewritten.post || finalPost;
-      } catch {
-        // נשאר עם הפוסט המקורי
-      }
+      } catch {}
     }
 
     res.json({ post: finalPost });
@@ -258,9 +252,26 @@ app.post("/improve", async (req, res) => {
     }
 
     let tonePrompt = "";
-    if (tone === "aggressive") tonePrompt = "שכתב בסגנון מכירתי חזק יותר עם אנרגיה גבוהה ואימוג'ים";
-    if (tone === "luxury") tonePrompt = "שכתב בסגנון יוקרתי ומלוטש עם אימוג'ים אלגנטיים";
-    if (tone === "casual") tonePrompt = "שכתב בסגנון קליל וזורם עם אימוג'ים כיפיים";
+
+    if (tone === "aggressive") tonePrompt = `שכתב את הפוסט הבא בסגנון מכירתי משכנע.
+המטרה: ליצור רצון, לדבר על תועלת ולהניע לפעולה.
+אל תשתמש במילים: "אל תחכו", "מהרו", "פיצוץ", "חוויה שלא תשכחו", "מדהים", "מושלם".
+כתוב בעברית טבעית שמשכנעת בלי לצעוק.
+סיים בקריאה לפעולה ברורה.`;
+
+    if (tone === "luxury") tonePrompt = `שכתב את הפוסט הבא בסגנון יוקרתי ואלגנטי.
+המטרה: לשדר איכות, ביטחון ויוקרה — בלי לצעוק.
+כתוב כמו מותג יוקרה: מעט מילים, משמעות גדולה.
+אל תשתמש במילים: "מדהים", "מושלם", "מהפכה", "הדור הבא".
+השתמש במעט אימוג'ים בלבד — רק כשצריך.
+כתוב בעברית אלגנטית ומלוטשת.`;
+
+    if (tone === "casual") tonePrompt = `שכתב את הפוסט הבא בסגנון קליל ויומיומי.
+המטרה: להרגיש כאילו בעל העסק בעצמו כתב את הפוסט.
+כתוב בשפה פשוטה, ישירה וחברותית.
+אל תשתמש במילים גבוהות או שיווקיות מדי.
+השתמש באימוג'ים בצורה טבעית וכיפית.
+כתוב כאילו אתה מדבר עם חבר.`;
 
     if (!tonePrompt) {
       return res.status(400).json({ error: "Invalid tone" });
@@ -279,8 +290,9 @@ app.post("/improve", async (req, res) => {
         messages: [
           {
             role: "user",
-            content: `${tonePrompt}:
+            content: `${tonePrompt}
 
+הפוסט:
 ${post}
 
 החזר JSON:
