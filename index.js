@@ -3,6 +3,7 @@ import multer from "multer";
 import cors from "cors";
 import fs from "fs";
 import fetch from "node-fetch";
+import sharp from "sharp";
 import strategies from "./strategies.js";
 
 const app = express();
@@ -37,7 +38,8 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       return res.status(400).json({ error: "Missing image" });
     }
 
-    const imageBuffer = await fs.promises.readFile(req.file.path);
+    const rawBuffer = await fs.promises.readFile(req.file.path);
+    const imageBuffer = await sharp(rawBuffer).resize(1024, 1024, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: 80 }).toBuffer();
     const base64Image = imageBuffer.toString("base64");
 
     const visionResponse = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -49,6 +51,7 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       body: JSON.stringify({
         model: "gpt-4o",
         max_tokens: 300,
+        temperature: 0.2,
         response_format: { type: "json_object" },
         messages: [
           {
@@ -163,6 +166,7 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
       body: JSON.stringify({
         model: "gpt-4o",
         max_tokens: 1000,
+        temperature: 0.85,
         response_format: { type: "json_object" },
         messages: [{ role: "user", content: postPrompt }],
       }),
@@ -201,6 +205,7 @@ rewrite יהיה true רק אם overall נמוך מ-8.`;
       body: JSON.stringify({
         model: "gpt-4o",
         max_tokens: 200,
+        temperature: 0.1,
         response_format: { type: "json_object" },
         messages: [{ role: "user", content: reviewPrompt }],
       }),
@@ -333,6 +338,7 @@ ${brand ? `שם המותג: ${brand}` : ""}
       body: JSON.stringify({
         model: "gpt-4o",
         max_tokens: 600,
+        temperature: 0.85,
         response_format: { type: "json_object" },
         messages: [
           {
