@@ -27,6 +27,7 @@ const upload = multer({
 });
  
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const REMOVE_BG_API_KEY = process.env.REMOVE_BG_API_KEY;
  
 if (!OPENAI_API_KEY) {
   console.error("❌ חסר OPENAI_API_KEY");
@@ -70,7 +71,7 @@ async function callOpenAIWithRetry(body, { maxRetries = 3, retryDelayMs = 1000 }
   throw lastError || new Error("OpenAI call failed after retries");
 }
  
-// עוטף קריאה ל-OpenAI Image API (multipart/form-data) בניסיונות חוזרים
+// עוטף קריאה ל-OpenAI Image Edit API (multipart/form-data) בניסיונות חוזרים
 async function callOpenAIImageEditWithRetry(form, { maxRetries = 3, retryDelayMs = 1000 } = {}) {
   let lastError = null;
  
@@ -107,50 +108,7 @@ async function callOpenAIImageEditWithRetry(form, { maxRetries = 3, retryDelayMs
   throw lastError || new Error("OpenAI image call failed after retries");
 }
  
-// יוצר תמונת רקע חדשה מאפס (בלי מוצר בכלל) לפי תיאור - עם ניסיונות חוזרים
-async function generateBackgroundWithRetry(prompt, { maxRetries = 3, retryDelayMs = 1000 } = {}) {
-  let lastError = null;
- 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const response = await fetch("https://api.openai.com/v1/images/generations", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "gpt-image-1",
-          prompt,
-          size: "1024x1024",
-        }),
-      });
- 
-      const isRetryableStatus = response.status === 429 || response.status >= 500;
- 
-      if (!response.ok && isRetryableStatus && attempt < maxRetries) {
-        console.log(`Background generation failed (status ${response.status}), attempt ${attempt}/${maxRetries}. Retrying...`);
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
-        continue;
-      }
- 
-      return response;
-    } catch (err) {
-      lastError = err;
-      console.log(`Background generation threw error, attempt ${attempt}/${maxRetries}:`, err.message);
-      if (attempt < maxRetries) {
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
-        continue;
-      }
-    }
-  }
- 
-  throw lastError || new Error("Background generation failed after retries");
-}
- 
-// שולח תמונה ל-remove.bg ומחזיר buffer של PNG עם שקיפות (המוצר בלבד, בלי רקע)
-const REMOVE_BG_API_KEY = process.env.REMOVE_BG_API_KEY;
- 
+// שולח תמונה ל-remove.bg ומחזיר buffer של PNG עם שקיפות (המוצר אטום, הרקע שקוף)
 async function removeBackground(imageBuffer, { maxRetries = 3, retryDelayMs = 1000 } = {}) {
   if (!REMOVE_BG_API_KEY) {
     throw new Error("חסר REMOVE_BG_API_KEY");
@@ -161,7 +119,7 @@ async function removeBackground(imageBuffer, { maxRetries = 3, retryDelayMs = 10
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const form = new FormData();
-      form.append("image_file", imageBuffer, { filename: "image.jpg", contentType: "image/jpeg" });
+      form.append("image_file", imageBuffer, { filename: "image.png", contentType: "image/png" });
       form.append("size", "auto");
  
       const response = await fetch("https://api.remove.bg/v1.0/removebg", {
@@ -415,12 +373,11 @@ ${written.post}
   }
 });
  
-// endpoint חדש: שינוי הרקע של תמונת המוצר.
-// שיטת עבודה שמבטיחה שהמוצר עצמו לא משתנה כלל:
-// 1. remove.bg מפריד את המוצר מהרקע המקורי (מחזיר PNG שקוף עם המוצר בלבד)
-// 2. OpenAI מייצר תמונת רקע חדשה מאפס - בלי שום מוצר בתוכה, רק "סצנה ריקה"
-// 3. sharp מדביק (composite) את המוצר המדויק מקטע 1 על גבי הרקע החדש מקטע 2
-// כך המוצר נשאר פיקסל-מדויק, כי הוא אף פעם לא עובר דרך ה-AI בשנית.
+// endpoint: שינוי הרקע של תמונת המוצר, בשיטת "מסכה" (mask):
+// 1. remove.bg מזהה בדיוק אילו פיקסלים שייכים למוצר (אטום) ואילו לרקע (שקוף)
+// 2. אנחנו שולחים ל-OpenAI את התמונה המקורית + את המסכה הזו
+// 3. OpenAI מצייר מחדש רק את האזור השקוף (הרקע) ומשאיר את האזור האטום (המוצר) בדיוק כמו שהוא
+// כך המוצר נשמר מדויק, וה-AI מוסיף תאורה/צללים טבעיים סביבו כי הוא "רואה" את המוצר בזמן הציור.
 app.post("/change-background", upload.single("image"), async (req, res) => {
   try {
     if (!req.file) {
@@ -431,45 +388,45 @@ app.post("/change-background", upload.single("image"), async (req, res) => {
     const hasUserPrompt = userPrompt && userPrompt.trim().length > 0;
  
     const rawBuffer = await fs.promises.readFile(req.file.path);
-    const originalBuffer = await sharp(rawBuffer)
-      .resize(1200, 1200, { fit: "inside", withoutEnlargement: true })
-      .jpeg({ quality: 90 })
-      .toBuffer();
  
-    // שלב 1: הפרדת המוצר מהרקע
-    const cutoutBuffer = await removeBackground(originalBuffer);
-    const cutoutMeta = await sharp(cutoutBuffer).metadata();
- 
-    // שלב 2: יצירת רקע חדש, בלי שום מוצר בתוכו
-    const backgroundPrompt = hasUserPrompt
-      ? `תמונת רקע ריקה (בלי אף מוצר, בלי אף חפץ מרכזי, בלי בני אדם) לפי התיאור הבא: ${userPrompt.trim()}. זו צריכה להיראות כמו רקע צילום מוכן שממתין שיניחו עליו מוצר - לא כולל שום עצם מרכזי.`
-      : `תמונת רקע ריקה ומקצועית לצילום מוצרים (בלי אף מוצר, בלי אף חפץ מרכזי, בלי בני אדם), שמתאימה לשווק את המוצר הבא: ${description || "מוצר כללי"}. הרקע צריך להיות נקי, לא עמוס, בסגנון סטודיו/חנות - רק המשטח והרקע, בלי שום עצם מרכזי עליו.`;
- 
-    const backgroundResponse = await generateBackgroundWithRetry(backgroundPrompt);
-    const backgroundData = await backgroundResponse.json();
-    const backgroundB64 = backgroundData?.data?.[0]?.b64_json;
- 
-    if (!backgroundB64) {
-      console.log("BACKGROUND CHANGE - no background generated:", JSON.stringify(backgroundData));
-      return res.status(500).json({ error: "לא הצלחנו ליצור את הרקע החדש" });
-    }
- 
-    const backgroundBuffer = Buffer.from(backgroundB64, "base64");
- 
-    // שלב 3: הדבקת המוצר המדויק על הרקע החדש, ממורכז ובגודל סביר (כ-70% מהרוחב)
-    const targetWidth = Math.round(1024 * 0.7);
-    const resizedCutout = await sharp(cutoutBuffer)
-      .resize({ width: targetWidth, height: targetWidth, fit: "inside", withoutEnlargement: true })
-      .toBuffer();
- 
-    const finalBuffer = await sharp(backgroundBuffer)
-      .resize(1024, 1024, { fit: "cover" })
-      .composite([{ input: resizedCutout, gravity: "center" }])
+    // התמונה הבסיסית: ריבוע 1024x1024, עם ריפוד לבן אם צריך - כדי שתתאים בדיוק למסכה
+    const baseImageBuffer = await sharp(rawBuffer)
+      .resize(1024, 1024, { fit: "contain", background: { r: 255, g: 255, b: 255, alpha: 1 } })
       .png()
       .toBuffer();
  
+    // הפרדת המוצר מהרקע - על אותה תמונה בסיסית, כדי שהמסכה תתיישר בדיוק
+    const cutoutBuffer = await removeBackground(baseImageBuffer);
+ 
+    // המסכה עצמה: אותו ריבוע 1024x1024, המוצר אטום והרקע שקוף
+    const maskBuffer = await sharp(cutoutBuffer)
+      .resize(1024, 1024, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
+      .ensureAlpha()
+      .png()
+      .toBuffer();
+ 
+    const backgroundInstruction = hasUserPrompt
+      ? `צייר מחדש את הרקע (האזור השקוף במסכה) לפי הבקשה הבאה: ${userPrompt.trim()}. הוסף תאורה, צללים והשתקפויות טבעיים שמתאימים למוצר הקיים בתמונה. אל תיגע באזור האטום של המסכה - זה המוצר, והוא חייב להישאר בדיוק כפי שהוא.`
+      : `צייר מחדש את הרקע (האזור השקוף במסכה) לרקע נקי ומקצועי שמתאים למוצר הבא: ${description || "המוצר בתמונה"}. הוסף תאורה, צללים והשתקפויות טבעיים שמתאימים למוצר הקיים בתמונה. אל תיגע באזור האטום של המסכה - זה המוצר, והוא חייב להישאר בדיוק כפי שהוא.`;
+ 
+    const form = new FormData();
+    form.append("image", baseImageBuffer, { filename: "image.png", contentType: "image/png" });
+    form.append("mask", maskBuffer, { filename: "mask.png", contentType: "image/png" });
+    form.append("prompt", backgroundInstruction);
+    form.append("model", "gpt-image-1");
+    form.append("size", "1024x1024");
+ 
+    const imageResponse = await callOpenAIImageEditWithRetry(form);
+    const imageData = await imageResponse.json();
+    const base64Result = imageData?.data?.[0]?.b64_json;
+ 
+    if (!base64Result) {
+      console.log("BACKGROUND CHANGE - no image returned:", JSON.stringify(imageData));
+      return res.status(500).json({ error: "לא הצלחנו ליצור את הרקע החדש" });
+    }
+ 
     res.json({
-      image: `data:image/png;base64,${finalBuffer.toString("base64")}`,
+      image: `data:image/png;base64,${base64Result}`,
     });
  
     try {
@@ -584,3 +541,4 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log("🔥 Backend עובד על פורט", PORT);
 });
+ 
