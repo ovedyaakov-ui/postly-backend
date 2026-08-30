@@ -32,6 +32,46 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
  
+// עוטף קריאה ל-OpenAI בניסיונות חוזרים (retry) במקרה של כשל זמני
+// (timeout, rate limit, שגיאת שרת זמנית וכו')
+async function callOpenAIWithRetry(body, { maxRetries = 3, retryDelayMs = 1000 } = {}) {
+  let lastError = null;
+ 
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify(body),
+      });
+ 
+      // שגיאות זמניות (עומס, rate limit, בעיית שרת) - כדאי לנסות שוב
+      const isRetryableStatus = response.status === 429 || response.status >= 500;
+ 
+      if (!response.ok && isRetryableStatus && attempt < maxRetries) {
+        console.log(`OpenAI call failed (status ${response.status}), attempt ${attempt}/${maxRetries}. Retrying...`);
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
+        continue;
+      }
+ 
+      return response;
+    } catch (err) {
+      // שגיאת רשת/timeout - כדאי לנסות שוב
+      lastError = err;
+      console.log(`OpenAI call threw error, attempt ${attempt}/${maxRetries}:`, err.message);
+      if (attempt < maxRetries) {
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
+        continue;
+      }
+    }
+  }
+ 
+  throw lastError || new Error("OpenAI call failed after retries");
+}
+ 
 app.post("/analyze", upload.single("image"), async (req, res) => {
   try {
     if (!req.file) {
@@ -42,24 +82,18 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
     const imageBuffer = await sharp(rawBuffer).resize(1024, 1024, { fit: "inside", withoutEnlargement: true }).jpeg({ quality: 80 }).toBuffer();
     const base64Image = imageBuffer.toString("base64");
  
-    const visionResponse = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o",
-        max_tokens: 300,
-        temperature: 0.2,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: `נתח את התמונה והחזר JSON בלבד.
+    const visionResponse = await callOpenAIWithRetry({
+      model: "gpt-4o",
+      max_tokens: 300,
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `נתח את התמונה והחזר JSON בלבד.
  
 חשוב: זהה מה המוצר או השירות מיועד לעשות — לא רק מה שרואים פיזית.
 לדוגמה: אם רואים בקבוק עם תרסיס, כתוב "חומר לניקוי חלונות" ולא "בקבוק".
@@ -76,17 +110,16 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
   "productName": "שם המוצר אם נראה בבירור בתמונה, אחרת null",
   "brand": "שם המותג אם נראה בבירור בתמונה, אחרת null"
 }`
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:image/jpeg;base64,${base64Image}`,
               },
-              {
-                type: "image_url",
-                image_url: {
-                  url: `data:image/jpeg;base64,${base64Image}`,
-                },
-              },
-            ],
-          },
-        ],
-      }),
+            },
+          ],
+        },
+      ],
     });
  
     const visionData = await visionResponse.json();
@@ -157,19 +190,12 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
  
 החזר JSON בלבד: { "post": "" }`;
  
-    const writeResponse = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o",
-        max_tokens: 1000,
-        temperature: 0.85,
-        response_format: { type: "json_object" },
-        messages: [{ role: "user", content: postPrompt }],
-      }),
+    const writeResponse = await callOpenAIWithRetry({
+      model: "gpt-4o",
+      max_tokens: 1000,
+      temperature: 0.85,
+      response_format: { type: "json_object" },
+      messages: [{ role: "user", content: postPrompt }],
     });
  
     const writeData = await writeResponse.json();
@@ -196,19 +222,12 @@ ${written.post}
  
 rewrite יהיה true רק אם overall נמוך מ-8.`;
  
-    const reviewResponse = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o",
-        max_tokens: 200,
-        temperature: 0.1,
-        response_format: { type: "json_object" },
-        messages: [{ role: "user", content: reviewPrompt }],
-      }),
+    const reviewResponse = await callOpenAIWithRetry({
+      model: "gpt-4o",
+      max_tokens: 200,
+      temperature: 0.1,
+      response_format: { type: "json_object" },
+      messages: [{ role: "user", content: reviewPrompt }],
     });
  
     const reviewData = await reviewResponse.json();
@@ -223,27 +242,20 @@ rewrite יהיה true רק אם overall נמוך מ-8.`;
     let finalPost = written.post;
  
     if (review.rewrite) {
-      const rewriteResponse = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "gpt-4o",
-          max_tokens: 1000,
-          response_format: { type: "json_object" },
-          messages: [
-            {
-              role: "user",
-              content: `שפר את הפוסט הבא. גרום לו להיות יותר טבעי, מושך ומכירתי:
+      const rewriteResponse = await callOpenAIWithRetry({
+        model: "gpt-4o",
+        max_tokens: 1000,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "user",
+            content: `שפר את הפוסט הבא. גרום לו להיות יותר טבעי, מושך ומכירתי:
  
 ${written.post}
  
 החזר JSON בלבד: { "post": "" }`
-            }
-          ],
-        }),
+          }
+        ],
       });
  
       const rewriteData = await rewriteResponse.json();
@@ -329,30 +341,23 @@ ${brand ? `שם המותג: ${brand}` : ""}
       return res.status(400).json({ error: "Invalid tone" });
     }
  
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o",
-        max_tokens: 600,
-        temperature: 0.85,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "user",
-            content: `${tonePrompt}
+    const response = await callOpenAIWithRetry({
+      model: "gpt-4o",
+      max_tokens: 600,
+      temperature: 0.85,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "user",
+          content: `${tonePrompt}
  
 הפוסט המקורי:
 ${post}
  
 החזר JSON:
 { "post": "" }`,
-          },
-        ],
-      }),
+        },
+      ],
     });
  
     const data = await response.json();
@@ -381,4 +386,3 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log("🔥 Backend עובד על פורט", PORT);
 });
- 
