@@ -4,6 +4,7 @@ import cors from "cors";
 import fs from "fs";
 import fetch from "node-fetch";
 import sharp from "sharp";
+import FormData from "form-data";
 import strategies from "./strategies.js";
  
 const app = express();
@@ -32,8 +33,7 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
  
-// עוטף קריאה ל-OpenAI בניסיונות חוזרים (retry) במקרה של כשל זמני
-// (timeout, rate limit, שגיאת שרת זמנית וכו')
+// עוטף קריאה ל-OpenAI (טקסט/JSON) בניסיונות חוזרים (retry) במקרה של כשל זמני
 async function callOpenAIWithRetry(body, { maxRetries = 3, retryDelayMs = 1000 } = {}) {
   let lastError = null;
  
@@ -48,7 +48,6 @@ async function callOpenAIWithRetry(body, { maxRetries = 3, retryDelayMs = 1000 }
         body: JSON.stringify(body),
       });
  
-      // שגיאות זמניות (עומס, rate limit, בעיית שרת) - כדאי לנסות שוב
       const isRetryableStatus = response.status === 429 || response.status >= 500;
  
       if (!response.ok && isRetryableStatus && attempt < maxRetries) {
@@ -59,7 +58,6 @@ async function callOpenAIWithRetry(body, { maxRetries = 3, retryDelayMs = 1000 }
  
       return response;
     } catch (err) {
-      // שגיאת רשת/timeout - כדאי לנסות שוב
       lastError = err;
       console.log(`OpenAI call threw error, attempt ${attempt}/${maxRetries}:`, err.message);
       if (attempt < maxRetries) {
@@ -70,6 +68,43 @@ async function callOpenAIWithRetry(body, { maxRetries = 3, retryDelayMs = 1000 }
   }
  
   throw lastError || new Error("OpenAI call failed after retries");
+}
+ 
+// עוטף קריאה ל-OpenAI Image API (multipart/form-data) בניסיונות חוזרים
+async function callOpenAIImageEditWithRetry(form, { maxRetries = 3, retryDelayMs = 1000 } = {}) {
+  let lastError = null;
+ 
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch("https://api.openai.com/v1/images/edits", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          ...form.getHeaders(),
+        },
+        body: form.getBuffer(),
+      });
+ 
+      const isRetryableStatus = response.status === 429 || response.status >= 500;
+ 
+      if (!response.ok && isRetryableStatus && attempt < maxRetries) {
+        console.log(`OpenAI image call failed (status ${response.status}), attempt ${attempt}/${maxRetries}. Retrying...`);
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
+        continue;
+      }
+ 
+      return response;
+    } catch (err) {
+      lastError = err;
+      console.log(`OpenAI image call threw error, attempt ${attempt}/${maxRetries}:`, err.message);
+      if (attempt < maxRetries) {
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
+        continue;
+      }
+    }
+  }
+ 
+  throw lastError || new Error("OpenAI image call failed after retries");
 }
  
 app.post("/analyze", upload.single("image"), async (req, res) => {
@@ -287,6 +322,62 @@ ${written.post}
   }
 });
  
+// endpoint חדש: שינוי הרקע של תמונת המוצר.
+// מקבל תמונה + (אופציונלי) תיאור בקשה מהמשתמש + (אופציונלי) תיאור המוצר שכבר זוהה ב-/analyze.
+// אם לא התקבל userPrompt, ה-AI בוחר רקע מתאים אוטומטית לפי תיאור המוצר.
+app.post("/change-background", upload.single("image"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "Missing image" });
+    }
+ 
+    const { userPrompt, description } = req.body;
+ 
+    const rawBuffer = await fs.promises.readFile(req.file.path);
+    // OpenAI image edit דורש PNG
+    const imageBuffer = await sharp(rawBuffer)
+      .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
+      .png()
+      .toBuffer();
+ 
+    const hasUserPrompt = userPrompt && userPrompt.trim().length > 0;
+ 
+    const backgroundInstruction = hasUserPrompt
+      ? `שנה את הרקע של התמונה לפי הבקשה הבאה: ${userPrompt.trim()}. שמור בדיוק על המוצר המקורי - הצורה, הצבעים, הפרטים וההיגיון החזותי שלו לא משתנים. שנה רק את מה שמסביבו.`
+      : `שנה את הרקע של התמונה לרקע נקי ומקצועי שמתאים למוצר הבא: ${description || "המוצר בתמונה"}. הרקע צריך להיות פשוט, לא עמוס, ולהבליט את המוצר לצורך שיווק. שמור בדיוק על המוצר המקורי - הצורה, הצבעים, הפרטים וההיגיון החזותי שלו לא משתנים. שנה רק את מה שמסביבו.`;
+ 
+    const form = new FormData();
+    form.append("image", imageBuffer, { filename: "image.png", contentType: "image/png" });
+    form.append("prompt", backgroundInstruction);
+    form.append("model", "gpt-image-1");
+    form.append("size", "1024x1024");
+ 
+    const imageResponse = await callOpenAIImageEditWithRetry(form);
+    const imageData = await imageResponse.json();
+    const base64Result = imageData?.data?.[0]?.b64_json;
+ 
+    if (!base64Result) {
+      console.log("BACKGROUND CHANGE - no image returned:", JSON.stringify(imageData));
+      return res.status(500).json({ error: "לא הצלחנו ליצור את הרקע החדש" });
+    }
+ 
+    res.json({
+      image: `data:image/png;base64,${base64Result}`,
+    });
+ 
+    try {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (err) {
+      console.log("File cleanup error:", err);
+    }
+  } catch (error) {
+    console.log("BACKGROUND CHANGE ERROR:", error);
+    res.status(500).json({ error: "שגיאה בשינוי הרקע" });
+  }
+});
+ 
 app.post("/improve", async (req, res) => {
   try {
     const { post, tone, category, productName, brand } = req.body;
@@ -386,3 +477,4 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log("🔥 Backend עובד על פורט", PORT);
 });
+ 
