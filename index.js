@@ -398,6 +398,45 @@ app.post("/change-background", upload.single("image"), async (req, res) => {
     // הפרדת המוצר מהרקע - על אותה תמונה בסיסית, כדי שהמסכה תתיישר בדיוק
     const cutoutBuffer = await removeBackground(baseImageBuffer);
  
+    // חישוב הבהירות הממוצעת של המוצר עצמו (רק פיקסלים לא שקופים) -
+    // כדי שבמסלול האוטומטי נוכל להציע רקע בניגודיות טובה (מוצר כהה -> רקע בהיר, ולהפך)
+    let contrastInstruction = "";
+    try {
+      const { data, info } = await sharp(cutoutBuffer)
+        .ensureAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+ 
+      let sumR = 0, sumG = 0, sumB = 0, count = 0;
+      const channels = info.channels;
+      for (let i = 0; i < data.length; i += channels) {
+        const alpha = data[i + 3];
+        if (alpha > 10) {
+          sumR += data[i];
+          sumG += data[i + 1];
+          sumB += data[i + 2];
+          count++;
+        }
+      }
+ 
+      if (count > 0) {
+        const avgR = sumR / count;
+        const avgG = sumG / count;
+        const avgB = sumB / count;
+        const luminance = 0.299 * avgR + 0.587 * avgG + 0.114 * avgB;
+ 
+        if (luminance < 100) {
+          contrastInstruction = "המוצר בתמונה כהה בגוונו - בחר רקע בגוונים בהירים ורכים (כמו קרם, לבן שבור, בז' בהיר, ורוד בהיר או אפור בהיר), כדי שהמוצר יבלוט בבירור מולו ולא ישתלב ברקע.";
+        } else if (luminance > 180) {
+          contrastInstruction = "המוצר בתמונה בהיר בגוונו - בחר רקע בגוונים עמוקים ומעודנים יותר (לא שחור מוחלט), כדי שהמוצר יבלוט בבירור מולו ולא ישתלב ברקע.";
+        } else {
+          contrastInstruction = "ודא שהרקע שנבחר יוצר ניגודיות ברורה מספיק מול גוון המוצר, כך שהוא לא נשטף או משתלב עם הרקע.";
+        }
+      }
+    } catch (err) {
+      console.log("Contrast calculation error (continuing without it):", err.message);
+    }
+ 
     // המסכה עצמה: אותו ריבוע 1024x1024, המוצר אטום והרקע שקוף
     const maskBuffer = await sharp(cutoutBuffer)
       .resize(1024, 1024, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
@@ -407,7 +446,7 @@ app.post("/change-background", upload.single("image"), async (req, res) => {
  
     const backgroundInstruction = hasUserPrompt
       ? `צייר מחדש את הרקע (האזור השקוף במסכה) לפי הבקשה הבאה: ${userPrompt.trim()}. הוסף תאורה וצללים עדינים וטבעיים שמתאימים למוצר הקיים בתמונה - הצללים צריכים להיות רכים ושקופים חלקית, ולשמור על הגוון והצבע האמיתי של הרקע גם באזורים הסמוכים למוצר (גם אם המוצר עצמו כהה). אל תיצור אזורים שחורים או כהים מדי ליד המוצר. אל תיגע באזור האטום של המסכה - זה המוצר, והוא חייב להישאר בדיוק כפי שהוא.`
-      : `צייר מחדש את הרקע (האזור השקוף במסכה) לרקע נקי ומקצועי שמתאים למוצר הבא: ${description || "המוצר בתמונה"}. הוסף תאורה וצללים עדינים וטבעיים שמתאימים למוצר הקיים בתמונה - הצללים צריכים להיות רכים ושקופים חלקית, ולשמור על הגוון והצבע האמיתי של הרקע גם באזורים הסמוכים למוצר (גם אם המוצר עצמו כהה). אל תיצור אזורים שחורים או כהים מדי ליד המוצר. אל תיגע באזור האטום של המסכה - זה המוצר, והוא חייב להישאר בדיוק כפי שהוא.`;
+      : `צייר מחדש את הרקע (האזור השקוף במסכה) לרקע נקי ומקצועי שמתאים למוצר הבא: ${description || "המוצר בתמונה"}. ${contrastInstruction} הוסף תאורה וצללים עדינים וטבעיים שמתאימים למוצר הקיים בתמונה - הצללים צריכים להיות רכים ושקופים חלקית, ולשמור על הגוון והצבע האמיתי של הרקע גם באזורים הסמוכים למוצר (גם אם המוצר עצמו כהה). אל תיצור אזורים שחורים או כהים מדי ליד המוצר. אל תיגע באזור האטום של המסכה - זה המוצר, והוא חייב להישאר בדיוק כפי שהוא.`;
  
     const form = new FormData();
     form.append("image", baseImageBuffer, { filename: "image.png", contentType: "image/png" });
