@@ -27,7 +27,7 @@ const upload = multer({
 });
  
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const REMOVE_BG_API_KEY = process.env.REMOVE_BG_API_KEY;
+const PHOTOROOM_API_KEY = process.env.PHOTOROOM_API_KEY;
  
 if (!OPENAI_API_KEY) {
   console.error("❌ חסר OPENAI_API_KEY");
@@ -71,16 +71,21 @@ async function callOpenAIWithRetry(body, { maxRetries = 3, retryDelayMs = 1000 }
   throw lastError || new Error("OpenAI call failed after retries");
 }
  
-// עוטף קריאה ל-OpenAI Image Edit API (multipart/form-data) בניסיונות חוזרים
-async function callOpenAIImageEditWithRetry(form, { maxRetries = 3, retryDelayMs = 1000 } = {}) {
+// עוטף קריאה ל-Photoroom (הסרת רקע + רקע AI + צללים, הכל בקריאה אחת) בניסיונות חוזרים
+async function callPhotoroomWithRetry(form, { maxRetries = 3, retryDelayMs = 1000 } = {}) {
+  if (!PHOTOROOM_API_KEY) {
+    throw new Error("חסר PHOTOROOM_API_KEY");
+  }
+ 
   let lastError = null;
  
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const response = await fetch("https://api.openai.com/v1/images/edits", {
+      const response = await fetch("https://image-api.photoroom.com/v2/edit", {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "x-api-key": PHOTOROOM_API_KEY,
+          Accept: "image/png, application/json",
           ...form.getHeaders(),
         },
         body: form.getBuffer(),
@@ -89,7 +94,7 @@ async function callOpenAIImageEditWithRetry(form, { maxRetries = 3, retryDelayMs
       const isRetryableStatus = response.status === 429 || response.status >= 500;
  
       if (!response.ok && isRetryableStatus && attempt < maxRetries) {
-        console.log(`OpenAI image call failed (status ${response.status}), attempt ${attempt}/${maxRetries}. Retrying...`);
+        console.log(`Photoroom call failed (status ${response.status}), attempt ${attempt}/${maxRetries}. Retrying...`);
         await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
         continue;
       }
@@ -97,7 +102,7 @@ async function callOpenAIImageEditWithRetry(form, { maxRetries = 3, retryDelayMs
       return response;
     } catch (err) {
       lastError = err;
-      console.log(`OpenAI image call threw error, attempt ${attempt}/${maxRetries}:`, err.message);
+      console.log(`Photoroom call threw error, attempt ${attempt}/${maxRetries}:`, err.message);
       if (attempt < maxRetries) {
         await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
         continue;
@@ -105,165 +110,7 @@ async function callOpenAIImageEditWithRetry(form, { maxRetries = 3, retryDelayMs
     }
   }
  
-  throw lastError || new Error("OpenAI image call failed after retries");
-}
- 
-// שולח תמונה ל-remove.bg ומחזיר buffer של PNG עם שקיפות (המוצר אטום, הרקע שקוף)
-async function removeBackground(imageBuffer, { maxRetries = 3, retryDelayMs = 1000 } = {}) {
-  if (!REMOVE_BG_API_KEY) {
-    throw new Error("חסר REMOVE_BG_API_KEY");
-  }
- 
-  let lastError = null;
- 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const form = new FormData();
-      form.append("image_file", imageBuffer, { filename: "image.png", contentType: "image/png" });
-      form.append("size", "auto");
- 
-      const response = await fetch("https://api.remove.bg/v1.0/removebg", {
-        method: "POST",
-        headers: {
-          "X-Api-Key": REMOVE_BG_API_KEY,
-          ...form.getHeaders(),
-        },
-        body: form.getBuffer(),
-      });
- 
-      if (response.ok) {
-        const arrayBuffer = await response.arrayBuffer();
-        return Buffer.from(arrayBuffer);
-      }
- 
-      const isRetryableStatus = response.status === 429 || response.status >= 500;
-      if (isRetryableStatus && attempt < maxRetries) {
-        console.log(`remove.bg failed (status ${response.status}), attempt ${attempt}/${maxRetries}. Retrying...`);
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
-        continue;
-      }
- 
-      const errorText = await response.text();
-      throw new Error(`remove.bg error (status ${response.status}): ${errorText}`);
-    } catch (err) {
-      lastError = err;
-      console.log(`remove.bg call threw error, attempt ${attempt}/${maxRetries}:`, err.message);
-      if (attempt < maxRetries) {
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
-        continue;
-      }
-    }
-  }
- 
-  throw lastError || new Error("remove.bg failed after retries");
-}
- 
-// יוצר תמונת רקע חדשה מאפס (בלי מוצר בכלל) לפי תיאור - עם ניסיונות חוזרים
-// (משמש בנתיב ה"הדבקה" - למקרים עם פנים, שם דיוק חשוב יותר מטבעיות מושלמת)
-async function generateBackgroundWithRetry(prompt, { maxRetries = 3, retryDelayMs = 1000 } = {}) {
-  let lastError = null;
- 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const response = await fetch("https://api.openai.com/v1/images/generations", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "gpt-image-1",
-          prompt,
-          size: "1024x1024",
-        }),
-      });
- 
-      const isRetryableStatus = response.status === 429 || response.status >= 500;
- 
-      if (!response.ok && isRetryableStatus && attempt < maxRetries) {
-        console.log(`Background generation failed (status ${response.status}), attempt ${attempt}/${maxRetries}. Retrying...`);
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
-        continue;
-      }
- 
-      return response;
-    } catch (err) {
-      lastError = err;
-      console.log(`Background generation threw error, attempt ${attempt}/${maxRetries}:`, err.message);
-      if (attempt < maxRetries) {
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
-        continue;
-      }
-    }
-  }
- 
-  throw lastError || new Error("Background generation failed after retries");
-}
- 
-// בודק אם יש בתמונה פרצוף (אדם או בעל חיים) שדורש דיוק מלא ולא רק "הנחיה חזקה" מה-AI
-async function detectFaceWithRetry(base64Image, { maxRetries = 2, retryDelayMs = 800 } = {}) {
-  let lastError = null;
- 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const response = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "gpt-4o",
-          max_tokens: 20,
-          temperature: 0,
-          response_format: { type: "json_object" },
-          messages: [
-            {
-              role: "user",
-              content: [
-                {
-                  type: "text",
-                  text: `האם יש בתמונה הזו פרצוף ברור של אדם או בעל חיים (למשל כלב, חתול, אדם)? החזר JSON בלבד: {"hasFace": true} או {"hasFace": false}`,
-                },
-                {
-                  type: "image_url",
-                  image_url: { url: `data:image/jpeg;base64,${base64Image}` },
-                },
-              ],
-            },
-          ],
-        }),
-      });
- 
-      if (response.ok) {
-        const data = await response.json();
-        const text = data?.choices?.[0]?.message?.content;
-        try {
-          const parsed = JSON.parse(text);
-          return Boolean(parsed.hasFace);
-        } catch {
-          return false;
-        }
-      }
- 
-      const isRetryableStatus = response.status === 429 || response.status >= 500;
-      if (isRetryableStatus && attempt < maxRetries) {
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
-        continue;
-      }
- 
-      return false; // בכשל, נבחר בברירת מחדל בטוחה (מסכה, המסלול הרגיל)
-    } catch (err) {
-      lastError = err;
-      if (attempt < maxRetries) {
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
-        continue;
-      }
-    }
-  }
- 
-  console.log("Face detection failed, defaulting to hasFace=false:", lastError?.message);
-  return false;
+  throw lastError || new Error("Photoroom call failed after retries");
 }
  
 app.post("/analyze", upload.single("image"), async (req, res) => {
@@ -481,11 +328,9 @@ ${written.post}
   }
 });
  
-// endpoint: שינוי הרקע של תמונת המוצר, בשיטת "מסכה" (mask):
-// 1. remove.bg מזהה בדיוק אילו פיקסלים שייכים למוצר (אטום) ואילו לרקע (שקוף)
-// 2. אנחנו שולחים ל-OpenAI את התמונה המקורית + את המסכה הזו
-// 3. OpenAI מצייר מחדש רק את האזור השקוף (הרקע) ומשאיר את האזור האטום (המוצר) בדיוק כמו שהוא
-// כך המוצר נשמר מדויק, וה-AI מוסיף תאורה/צללים טבעיים סביבו כי הוא "רואה" את המוצר בזמן הציור.
+// endpoint: שינוי הרקע של תמונת המוצר, באמצעות Photoroom Image Editing API.
+// קריאה אחת עושה הכל: הסרת הרקע המקורי, יצירת רקע חדש שמתאים למוצר (AI Backgrounds),
+// והוספת צל טבעי (AI Shadow) - כולל שימור מדויק של המוצר עצמו (כולל פרטים כמו פרצוף).
 app.post("/change-background", upload.single("image"), async (req, res) => {
   try {
     if (!req.file) {
@@ -496,127 +341,34 @@ app.post("/change-background", upload.single("image"), async (req, res) => {
     const hasUserPrompt = userPrompt && userPrompt.trim().length > 0;
  
     const rawBuffer = await fs.promises.readFile(req.file.path);
- 
-    // התמונה הבסיסית: ריבוע 1024x1024, עם ריפוד לבן אם צריך - כדי שתתאים בדיוק למסכה
-    const baseImageBuffer = await sharp(rawBuffer)
-      .resize(1024, 1024, { fit: "contain", background: { r: 255, g: 255, b: 255, alpha: 1 } })
-      .png()
+    const imageBuffer = await sharp(rawBuffer)
+      .resize(1600, 1600, { fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 90 })
       .toBuffer();
  
-    // הפרדת המוצר מהרקע - על אותה תמונה בסיסית, כדי שהמסכה/ההדבקה תתיישר בדיוק
-    const cutoutBuffer = await removeBackground(baseImageBuffer);
+    const backgroundPrompt = hasUserPrompt
+      ? userPrompt.trim()
+      : `רקע טבעי, מקצועי ומתאים למוצר הבא: ${description || "המוצר בתמונה"}`;
  
-    // בדיקה אם יש בתמונה פרצוף (אדם/בעל חיים) - שם דיוק מלא חשוב יותר מטבעיות
-    const baseImageJpeg = await sharp(baseImageBuffer).jpeg({ quality: 80 }).toBuffer();
-    const hasFace = await detectFaceWithRetry(baseImageJpeg.toString("base64"));
+    const form = new FormData();
+    form.append("imageFile", imageBuffer, { filename: "image.jpg", contentType: "image/jpeg" });
+    form.append("shadow.mode", "ai.soft");
+    form.append("background.prompt", backgroundPrompt);
+    form.append("padding", "0.1");
  
-    // חישוב הבהירות הממוצעת של המוצר עצמו (רק פיקסלים לא שקופים) -
-    // כדי שבמסלול האוטומטי נוכל להציע רקע בניגודיות טובה (מוצר כהה -> רקע בהיר, ולהפך)
-    let contrastInstruction = "";
-    try {
-      const { data, info } = await sharp(cutoutBuffer)
-        .ensureAlpha()
-        .raw()
-        .toBuffer({ resolveWithObject: true });
+    const photoroomResponse = await callPhotoroomWithRetry(form);
  
-      let sumR = 0, sumG = 0, sumB = 0, count = 0;
-      const channels = info.channels;
-      for (let i = 0; i < data.length; i += channels) {
-        const alpha = data[i + 3];
-        if (alpha > 10) {
-          sumR += data[i];
-          sumG += data[i + 1];
-          sumB += data[i + 2];
-          count++;
-        }
-      }
- 
-      if (count > 0) {
-        const avgR = sumR / count;
-        const avgG = sumG / count;
-        const avgB = sumB / count;
-        const luminance = 0.299 * avgR + 0.587 * avgG + 0.114 * avgB;
- 
-        if (luminance < 100) {
-          contrastInstruction = "המוצר בתמונה כהה בגוונו - בחר רקע בגוונים בהירים ורכים (כמו קרם, לבן שבור, בז' בהיר, ורוד בהיר או אפור בהיר), כדי שהמוצר יבלוט בבירור מולו ולא ישתלב ברקע.";
-        } else if (luminance > 180) {
-          contrastInstruction = "המוצר בתמונה בהיר בגוונו - בחר רקע בגוונים עמוקים ומעודנים יותר (לא שחור מוחלט), כדי שהמוצר יבלוט בבירור מולו ולא ישתלב ברקע.";
-        } else {
-          contrastInstruction = "ודא שהרקע שנבחר יוצר ניגודיות ברורה מספיק מול גוון המוצר, כך שהוא לא נשטף או משתלב עם הרקע.";
-        }
-      }
-    } catch (err) {
-      console.log("Contrast calculation error (continuing without it):", err.message);
+    if (!photoroomResponse.ok) {
+      const errorText = await photoroomResponse.text();
+      console.log("PHOTOROOM ERROR:", photoroomResponse.status, errorText);
+      return res.status(500).json({ error: "לא הצלחנו לשנות את הרקע" });
     }
  
-    let finalBase64;
- 
-    if (hasFace) {
-      // מסלול הדבקה מדויקת: יוצרים רקע נפרד לגמרי (בלי מוצר), ומדביקים עליו את החיתוך המדויק.
-      // המוצר (כולל פרצוף) לא עובר שוב דרך ה-AI, ולכן לא יכול להשתנות - קריטי לחיות מחמד/אנשים.
-      const backgroundGenPrompt = hasUserPrompt
-        ? `תמונת רקע ריקה (בלי אף מוצר, בלי אף חפץ מרכזי, בלי בני אדם או בעלי חיים) לפי התיאור הבא: ${userPrompt.trim()}. זו צריכה להיראות כמו רקע צילום מוכן שממתין שיניחו עליו נושא - לא כולל שום עצם מרכזי.`
-        : `צלם תמונת רקע של סצנה ביתית וחמימה - רצפת פרקט עץ בהירה, עם קיר לבן ברקע ואור טבעי רך שנכנס מהצד, כמו פינת סלון נעימה. אין בתמונה שום מוצר, חפץ מרכזי, בעל חיים או אדם - רק הסצנה הריקה עצמה, כאילו צולמה רגע לפני שהניחו עליה משהו. הסצנה הזו מיועדת לתמונה של: ${description || "תמונה כללית"}.`;
- 
-      const backgroundResponse = await generateBackgroundWithRetry(backgroundGenPrompt);
-      const backgroundData = await backgroundResponse.json();
-      const backgroundB64 = backgroundData?.data?.[0]?.b64_json;
- 
-      if (!backgroundB64) {
-        console.log("BACKGROUND CHANGE - no background generated:", JSON.stringify(backgroundData));
-        return res.status(500).json({ error: "לא הצלחנו ליצור את הרקע החדש" });
-      }
- 
-      const backgroundBuffer = Buffer.from(backgroundB64, "base64");
-      const targetWidth = Math.round(1024 * 0.7);
-      const resizedCutout = await sharp(cutoutBuffer)
-        .resize({ width: targetWidth, height: targetWidth, fit: "inside", withoutEnlargement: true })
-        .toBuffer();
- 
-      const finalBuffer = await sharp(backgroundBuffer)
-        .resize(1024, 1024, { fit: "cover" })
-        .composite([{ input: resizedCutout, gravity: "center" }])
-        .png()
-        .toBuffer();
- 
-      finalBase64 = finalBuffer.toString("base64");
-      var debugBackgroundBase64 = backgroundBuffer.toString("base64"); // זמני לצורך דיבוג
-    } else {
-      // מסלול מסכה: ה-AI מצייר את הרקע סביב המוצר תוך כדי שהוא רואה אותו - טבעי יותר,
-      // ומתאים כי אין כאן פרטים קריטיים (כמו פרצוף) שחייבים דיוק מוחלט.
-      const maskBuffer = await sharp(cutoutBuffer)
-        .resize(1024, 1024, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
-        .ensureAlpha()
-        .png()
-        .toBuffer();
- 
-      const backgroundInstruction = hasUserPrompt
-        ? `צייר מחדש את הרקע (האזור השקוף במסכה) לפי הבקשה הבאה: ${userPrompt.trim()}. הוסף תאורה וצללים עדינים וטבעיים שמתאימים למוצר הקיים בתמונה - הצללים צריכים להיות רכים ושקופים חלקית, ולשמור על הגוון והצבע האמיתי של הרקע גם באזורים הסמוכים למוצר (גם אם המוצר עצמו כהה). אל תיצור אזורים שחורים או כהים מדי ליד המוצר. אל תיגע באזור האטום של המסכה - זה המוצר, והוא חייב להישאר בדיוק כפי שהוא.`
-        : `צייר מחדש את הרקע (האזור השקוף במסכה) לרקע נקי ומקצועי שמתאים למוצר הבא: ${description || "המוצר בתמונה"}. ${contrastInstruction} הוסף תאורה וצללים עדינים וטבעיים שמתאימים למוצר הקיים בתמונה - הצללים צריכים להיות רכים ושקופים חלקית, ולשמור על הגוון והצבע האמיתי של הרקע גם באזורים הסמוכים למוצר (גם אם המוצר עצמו כהה). אל תיצור אזורים שחורים או כהים מדי ליד המוצר. אל תיגע באזור האטום של המסכה - זה המוצר, והוא חייב להישאר בדיוק כפי שהוא.`;
- 
-      const form = new FormData();
-      form.append("image", baseImageBuffer, { filename: "image.png", contentType: "image/png" });
-      form.append("mask", maskBuffer, { filename: "mask.png", contentType: "image/png" });
-      form.append("prompt", backgroundInstruction);
-      form.append("model", "gpt-image-1");
-      form.append("size", "1024x1024");
- 
-      const imageResponse = await callOpenAIImageEditWithRetry(form);
-      const imageData = await imageResponse.json();
-      const base64Result = imageData?.data?.[0]?.b64_json;
- 
-      if (!base64Result) {
-        console.log("BACKGROUND CHANGE - no image returned:", JSON.stringify(imageData));
-        return res.status(500).json({ error: "לא הצלחנו ליצור את הרקע החדש" });
-      }
- 
-      finalBase64 = base64Result;
-    }
+    const resultArrayBuffer = await photoroomResponse.arrayBuffer();
+    const resultBuffer = Buffer.from(resultArrayBuffer);
  
     res.json({
-      image: `data:image/png;base64,${finalBase64}`,
-      method: hasFace ? "composite" : "mask",
-      debugBackground: typeof debugBackgroundBase64 !== "undefined" ? `data:image/png;base64,${debugBackgroundBase64}` : null,
+      image: `data:image/png;base64,${resultBuffer.toString("base64")}`,
     });
  
     try {
