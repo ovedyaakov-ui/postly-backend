@@ -580,6 +580,7 @@ app.post("/change-background", upload.single("image"), async (req, res) => {
         .toBuffer();
  
       finalBase64 = finalBuffer.toString("base64");
+      var debugBackgroundBase64 = backgroundBuffer.toString("base64"); // זמני לצורך דיבוג
     } else {
       // מסלול מסכה: ה-AI מצייר את הרקע סביב המוצר תוך כדי שהוא רואה אותו - טבעי יותר,
       // ומתאים כי אין כאן פרטים קריטיים (כמו פרצוף) שחייבים דיוק מוחלט.
@@ -615,6 +616,7 @@ app.post("/change-background", upload.single("image"), async (req, res) => {
     res.json({
       image: `data:image/png;base64,${finalBase64}`,
       method: hasFace ? "composite" : "mask",
+      debugBackground: typeof debugBackgroundBase64 !== "undefined" ? `data:image/png;base64,${debugBackgroundBase64}` : null,
     });
  
     try {
