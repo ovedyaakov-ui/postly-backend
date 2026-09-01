@@ -348,7 +348,7 @@ app.post("/change-background", upload.single("image"), async (req, res) => {
  
     const backgroundPrompt = hasUserPrompt
       ? userPrompt.trim()
-      : `רקע טבעי, מקצועי ומתאים למוצר הבא: ${description || "המוצר בתמונה"}`;
+      : `the image displays ${description || "a product"} placed on a warm wooden surface, with soft natural daylight coming from a window, a softly blurred cozy home interior in the background`;
  
     const form = new FormData();
     form.append("imageFile", imageBuffer, { filename: "image.jpg", contentType: "image/jpeg" });
