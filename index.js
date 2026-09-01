@@ -35,7 +35,6 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
-// עוטף קריאה ל-OpenAI (טקסט/JSON) בניסיונות חוזרים
 async function callOpenAIWithRetry(
   body,
   { maxRetries = 3, retryDelayMs = 1000 } = {}
@@ -93,7 +92,6 @@ async function callOpenAIWithRetry(
   throw lastError || new Error("OpenAI call failed after retries");
 }
 
-// יוצר תמונת רקע חדשה מאפס לפי תיאור
 async function generateBackgroundWithRetry(
   prompt,
   { maxRetries = 3, retryDelayMs = 1000 } = {}
@@ -155,7 +153,6 @@ async function generateBackgroundWithRetry(
   throw lastError || new Error("Background generation failed after retries");
 }
 
-// שולח תמונה ל-remove.bg ומחזיר PNG שקוף של המוצר
 async function removeBackground(
   imageBuffer,
   { maxRetries = 3, retryDelayMs = 1000 } = {}
@@ -483,13 +480,12 @@ ${written.post}
 });
 
 // ============================================================
-// PRODUCT STAGING V1
+// PRODUCT STAGING V1.1
 // ============================================================
-// 1. remove.bg מפריד את המוצר המקורי מהרקע.
-// 2. OpenAI מייצר סצנה פרסומית עם משטח הצבה ברור.
-// 3. sharp מעגן את תחתית המוצר למשטח ומוסיף צל מגע.
-// V1 משתמש במשטחים פתוחים ולא במכלים עמוקים שדורשים
-// שכבת foreground / occlusion כמו סלסלה עמוקה.
+// המוצר המקורי נשמר.
+// OpenAI מייצר רק את סביבת הפרסום.
+// המוצר מעוגן לנקודת מגע קבועה.
+// צל המגע קטן וצמוד יותר כדי למנוע תחושת "הדבקה".
 // ============================================================
 
 app.post(
@@ -508,9 +504,7 @@ app.post(
       const hasUserPrompt =
         userPrompt && userPrompt.trim().length > 0;
 
-      const rawBuffer = await fs.promises.readFile(
-        req.file.path
-      );
+      const rawBuffer = await fs.promises.readFile(req.file.path);
 
       const originalBuffer = await sharp(rawBuffer)
         .resize(1200, 1200, {
@@ -520,81 +514,93 @@ app.post(
         .jpeg({ quality: 90 })
         .toBuffer();
 
-      // שלב 1 — הפרדת המוצר
-      const cutoutBuffer =
-        await removeBackground(originalBuffer);
+      // 1. הפרדת המוצר המקורי
+      const cutoutBuffer = await removeBackground(originalBuffer);
 
-      // שלב 2 — יצירת סצנת פרסום
       const requestedScene = hasUserPrompt
         ? userPrompt.trim()
         : `a clean professional advertising environment suitable for ${
             description || "the advertised product"
           }`;
 
+      // 2. יצירת סצנת פרסום שתואמת מראש למיקום המוצר
       const backgroundGenPrompt = `
-Create a photorealistic commercial product-staging background plate.
+Create a photorealistic commercial advertising scene.
 
 Requested environment:
 ${requestedScene}
 
-IMPORTANT COMPOSITION RULES:
+This image is a BACKGROUND PLATE.
+The real advertised product will be inserted later and must NOT be generated.
 
-- Do NOT generate the advertised product.
-- Do NOT generate substitute packaging, logos or product text.
-- Do NOT generate a person or animal in the central product placement area.
+STRICT RULES:
 
-- Create a realistic OPEN presentation surface for the future product.
-  Good examples:
-  a wooden table,
-  a flat serving tray,
-  a low advertising pedestal,
-  a shop counter,
-  a flat or very shallow decorative plate.
+1. DO NOT generate the advertised product.
+2. DO NOT generate substitute product packaging.
+3. DO NOT generate logos, labels, advertising text or watermarks.
+4. DO NOT put people or animals in the central product area.
 
-- Do NOT use a deep basket.
-- Do NOT use a deep bowl.
-- Do NOT use a box, bag or deep container.
-- Do NOT create any prop that would need to cover the future product.
+PRODUCT PLACEMENT:
 
-- Keep the CENTRAL PRODUCT PLACEMENT ZONE EMPTY.
+- Leave a clean empty product zone in the horizontal center.
+- A real product will later be placed in that empty zone.
+- Its bottom edge will touch the scene at approximately 79% of the image height.
 
-- The real product will later be composited at the horizontal center of the image.
+SURFACE:
 
-- The future product's BOTTOM CONTACT POINT will be approximately 78 percent down from the top of the image.
+- Create one obvious physical support surface exactly under that placement zone.
+- The support surface must cross the image at approximately 79% of image height.
+- The support must visually continue behind and around the future product.
+- The camera perspective must make a product placed there look naturally supported.
 
-- The presentation surface MUST naturally pass through that contact area.
+Suitable supports include:
+- wooden table
+- cafe table
+- shop counter
+- stone counter
+- flat serving board
+- flat tray
+- low product pedestal
+- very shallow decorative plate
 
-- Compose the photograph so that an object placed at that exact point would clearly appear to be physically resting on the surface and NOT floating.
+DO NOT use:
+- deep basket
+- deep bowl
+- deep container
+- box
+- bag
+- holder with high sides
 
-- Keep decorative props outside the central product placement zone.
+Those objects require foreground occlusion and are not allowed in this version.
 
-- Decorative advertising props may appear to the left and right of the future product.
+COMPOSITION:
 
-- Use realistic commercial photography perspective.
+- The future product is the hero subject.
+- Keep the center visually clean.
+- Put cups, plants, decorations and other props to the sides.
+- Do not place props directly behind the future product if they create visual clutter.
+- Use a natural eye-level commercial product photography angle.
+- Make the environment immediately recognizable as requested.
+- Use realistic lighting and realistic perspective.
+- The support surface should receive soft believable environmental light.
 
-- Use realistic environmental lighting.
+FOCUS:
 
-- The requested environment must be immediately recognizable.
+- Keep the product area and support surface sharp.
+- Keep the environment detailed and recognizable.
+- No heavy blur.
+- No strong bokeh.
+- No extreme shallow depth of field.
 
-- Keep the scene sharp and detailed.
-
-- NO heavy background blur.
-- NO strong bokeh.
-- NO extreme shallow depth of field.
-
-- Square 1:1 composition.
-
-- No text.
-- No watermark.
+Square 1:1 commercial photograph.
+No text.
+No watermark.
 `;
 
       const backgroundResponse =
-        await generateBackgroundWithRetry(
-          backgroundGenPrompt
-        );
+        await generateBackgroundWithRetry(backgroundGenPrompt);
 
-      const backgroundData =
-        await backgroundResponse.json();
+      const backgroundData = await backgroundResponse.json();
 
       const backgroundB64 =
         backgroundData?.data?.[0]?.b64_json;
@@ -615,65 +621,58 @@ IMPORTANT COMPOSITION RULES:
         "base64"
       );
 
-      // שלב 3 — גודל ומיקום המוצר
+      // 3. קומפוזיציית המוצר
       const canvasSize = 1024;
 
-      // קטן יותר מהגרסה הקודמת כדי לתת תחושה
-      // של צילום פרסומי בתוך הסביבה ולא מוצר ענק שמודבק עליה.
-      const targetWidth = Math.round(
-        canvasSize * 0.48
-      );
+      // המוצר תופס עד 46% מרוחב הפריים.
+      // כך נשארת סביבו סביבה פרסומית ולא מתקבלת תחושת cutout ענק.
+      const targetWidth = Math.round(canvasSize * 0.46);
+      const targetHeight = Math.round(canvasSize * 0.52);
 
-      const resizedCutout = await sharp(
-        cutoutBuffer
-      )
+      const resizedCutout = await sharp(cutoutBuffer)
         .resize({
           width: targetWidth,
-          height: Math.round(canvasSize * 0.58),
+          height: targetHeight,
           fit: "inside",
           withoutEnlargement: true,
         })
         .png()
         .toBuffer();
 
-      const resizedMeta = await sharp(
-        resizedCutout
-      ).metadata();
+      const resizedMeta = await sharp(resizedCutout).metadata();
 
       const productWidth =
         resizedMeta.width || targetWidth;
 
       const productHeight =
-        resizedMeta.height || targetWidth;
+        resizedMeta.height || targetHeight;
 
-      // מרכז אופקי
       const productLeft = Math.round(
         (canvasSize - productWidth) / 2
       );
 
-      // נקודת המגע שסוכמה עם OpenAI בפרומפט
-      const contactY = Math.round(
-        canvasSize * 0.78
-      );
+      // נקודת המגע של המוצר עם המשטח
+      const contactY = Math.round(canvasSize * 0.79);
 
-      // תחתית המוצר יושבת בדיוק על נקודת המגע
       const productTop = Math.max(
         0,
         contactY - productHeight
       );
 
       // ======================================================
-      // צל מגע
+      // CONTACT SHADOW V1.1
+      // צל קטן, שטוח ועדין יותר.
+      // המטרה היא ליצור תחושת משקל ולא "הילה" מתחת למוצר.
       // ======================================================
 
       const shadowWidth = Math.max(
-        40,
-        Math.round(productWidth * 0.72)
+        36,
+        Math.round(productWidth * 0.58)
       );
 
       const shadowHeight = Math.max(
-        14,
-        Math.round(productWidth * 0.1)
+        10,
+        Math.round(productWidth * 0.055)
       );
 
       const shadowSvg = `
@@ -688,7 +687,7 @@ IMPORTANT COMPOSITION RULES:
     rx="${shadowWidth / 2}"
     ry="${shadowHeight / 2}"
     fill="black"
-    fill-opacity="0.24"
+    fill-opacity="0.18"
   />
 </svg>`;
 
@@ -698,33 +697,29 @@ IMPORTANT COMPOSITION RULES:
         .blur(
           Math.max(
             2,
-            Math.round(shadowHeight * 0.28)
+            Math.round(shadowHeight * 0.22)
           )
         )
         .png()
         .toBuffer();
 
       const shadowLeft = Math.round(
-        (canvasSize - shadowWidth) / 2
+        productLeft +
+          productWidth / 2 -
+          shadowWidth / 2
       );
 
+      // הצל נכנס מעט מתחת למוצר ולא יושב בנפרד ממנו
       const shadowTop = Math.max(
         0,
         Math.min(
           canvasSize - shadowHeight,
-          contactY -
-            Math.round(shadowHeight * 0.58)
+          contactY - Math.round(shadowHeight * 0.7)
         )
       );
 
-      // ======================================================
-      // COMPOSITE
-      // רקע → צל → מוצר מקורי
-      // ======================================================
-
-      const finalBuffer = await sharp(
-        backgroundBuffer
-      )
+      // 4. רקע -> צל מגע -> המוצר המקורי
+      const finalBuffer = await sharp(backgroundBuffer)
         .resize(canvasSize, canvasSize, {
           fit: "cover",
         })
@@ -747,27 +742,18 @@ IMPORTANT COMPOSITION RULES:
         image: `data:image/png;base64,${finalBuffer.toString(
           "base64"
         )}`,
-        stagingVersion: "v1-surface-anchor",
+        stagingVersion: "v1.1-contact-shadow",
       });
 
       try {
-        if (
-          req.file &&
-          fs.existsSync(req.file.path)
-        ) {
+        if (req.file && fs.existsSync(req.file.path)) {
           fs.unlinkSync(req.file.path);
         }
       } catch (err) {
-        console.log(
-          "File cleanup error:",
-          err
-        );
+        console.log("File cleanup error:", err);
       }
     } catch (error) {
-      console.log(
-        "BACKGROUND CHANGE ERROR:",
-        error
-      );
+      console.log("BACKGROUND CHANGE ERROR:", error);
 
       res.status(500).json({
         error: "שגיאה בשינוי הרקע",
