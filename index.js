@@ -76,6 +76,7 @@ async function callOpenAIWithRetry(
         `OpenAI call threw error, attempt ${attempt}/${maxRetries}:`,
         err.message
       );
+
       if (attempt < maxRetries) {
         await new Promise((resolve) =>
           setTimeout(resolve, retryDelayMs * attempt)
@@ -134,6 +135,7 @@ async function callPhotoroomWithRetry(
         `Photoroom call threw error, attempt ${attempt}/${maxRetries}:`,
         err.message
       );
+
       if (attempt < maxRetries) {
         await new Promise((resolve) =>
           setTimeout(resolve, retryDelayMs * attempt)
@@ -153,10 +155,12 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
     }
 
     const rawBuffer = await fs.promises.readFile(req.file.path);
+
     const imageBuffer = await sharp(rawBuffer)
       .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
       .jpeg({ quality: 80 })
       .toBuffer();
+
     const base64Image = imageBuffer.toString("base64");
 
     const visionResponse = await callOpenAIWithRetry({
@@ -222,8 +226,10 @@ app.post("/analyze", upload.single("image"), async (req, res) => {
 
     const hook =
       strategy.hooks[Math.floor(Math.random() * strategy.hooks.length)];
+
     const cta =
       strategy.cta[Math.floor(Math.random() * strategy.cta.length)];
+
     const emojis = strategy.emoji.join(" ");
 
     let titleHint = "";
@@ -389,6 +395,7 @@ app.post("/change-background", upload.single("image"), async (req, res) => {
     }
 
     const { userPrompt, description } = req.body;
+
     const hasUserPrompt =
       userPrompt && userPrompt.trim().length > 0;
 
@@ -415,6 +422,7 @@ app.post("/change-background", upload.single("image"), async (req, res) => {
       contentType: "image/jpeg",
     });
 
+    form.append("shadow.mode", "ai.soft");
     form.append("background.prompt", backgroundPrompt);
     form.append("padding", "0.1");
 
@@ -423,6 +431,7 @@ app.post("/change-background", upload.single("image"), async (req, res) => {
 
     if (!photoroomResponse.ok) {
       const errorText = await photoroomResponse.text();
+
       console.log(
         "PHOTOROOM ERROR:",
         photoroomResponse.status,
@@ -454,6 +463,7 @@ app.post("/change-background", upload.single("image"), async (req, res) => {
     }
   } catch (error) {
     console.log("BACKGROUND CHANGE ERROR:", error);
+
     res.status(500).json({
       error: "שגיאה בשינוי הרקע",
     });
