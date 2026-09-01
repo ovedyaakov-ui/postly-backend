@@ -348,7 +348,9 @@ app.post("/change-background", upload.single("image"), async (req, res) => {
  
     const backgroundPrompt = hasUserPrompt
       ? userPrompt.trim()
-      : `the image displays ${description || "a product"} placed on a warm wooden surface, with soft natural daylight coming from a window, a softly blurred cozy home interior in the background`;
+      : `the image displays ${description || "a product"} placed outdoors on vivid green grass, under warm golden-hour sunlight, with a blurred garden in the background full of colorful flowers. Do not use gray, white, or neutral studio colors anywhere in the background.`;
+ 
+    console.log("BACKGROUND PROMPT SENT:", backgroundPrompt);
  
     const form = new FormData();
     form.append("imageFile", imageBuffer, { filename: "image.jpg", contentType: "image/jpeg" });
@@ -369,6 +371,7 @@ app.post("/change-background", upload.single("image"), async (req, res) => {
  
     res.json({
       image: `data:image/png;base64,${resultBuffer.toString("base64")}`,
+      debugPromptSent: backgroundPrompt,
     });
  
     try {
@@ -483,4 +486,3 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log("🔥 Backend עובד על פורט", PORT);
 });
- 
