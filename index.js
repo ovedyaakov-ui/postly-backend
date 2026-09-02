@@ -197,8 +197,8 @@ async function removeBackground(
 }
 
 // ============================================================
-// PRODUCT STAGING V2.2
-// OPENAI BACKGROUND GENERATION + LOCAL HALO IMAGE EDIT
+// PRODUCT STAGING V2.3
+// SHARP BACKGROUND + HALO EDIT + EDGE INTEGRATION
 // ============================================================
 
 async function generateProductBackgroundWithRetry(
@@ -291,7 +291,7 @@ async function editProductSceneWithRetry(
       });
 
       form.append("mask", maskBuffer, {
-        filename: "product-halo-mask.png",
+        filename: "product-edge-mask.png",
         contentType: "image/png",
       });
 
@@ -323,7 +323,7 @@ async function editProductSceneWithRetry(
         attempt < maxRetries
       ) {
         console.log(
-          `Product Staging V2.2 failed (status ${response.status}), attempt ${attempt}/${maxRetries}. Retrying...`
+          `Product Staging V2.3 failed (status ${response.status}), attempt ${attempt}/${maxRetries}. Retrying...`
         );
 
         await new Promise((resolve) =>
@@ -338,7 +338,7 @@ async function editProductSceneWithRetry(
       lastError = err;
 
       console.log(
-        `Product Staging V2.2 threw error, attempt ${attempt}/${maxRetries}:`,
+        `Product Staging V2.3 threw error, attempt ${attempt}/${maxRetries}:`,
         err.message
       );
 
@@ -353,7 +353,151 @@ async function editProductSceneWithRetry(
   }
 
   throw lastError ||
-    new Error("Product Staging V2.2 failed after retries");
+    new Error("Product Staging V2.3 failed after retries");
+}
+
+async function createErodedAlphaMask(
+  imageBuffer,
+  radius = 10
+) {
+  const {
+    data,
+    info,
+  } = await sharp(imageBuffer)
+    .ensureAlpha()
+    .extractChannel("alpha")
+    .raw()
+    .toBuffer({
+      resolveWithObject: true,
+    });
+
+  const width = info.width;
+  const height = info.height;
+
+  const binary = new Uint8Array(
+    width * height
+  );
+
+  for (
+    let i = 0;
+    i < data.length;
+    i++
+  ) {
+    binary[i] =
+      data[i] >= 128 ? 1 : 0;
+  }
+
+  const integralWidth = width + 1;
+  const integralHeight = height + 1;
+
+  const integral = new Uint32Array(
+    integralWidth * integralHeight
+  );
+
+  for (
+    let y = 1;
+    y < integralHeight;
+    y++
+  ) {
+    let rowSum = 0;
+
+    for (
+      let x = 1;
+      x < integralWidth;
+      x++
+    ) {
+      rowSum +=
+        binary[
+          (y - 1) * width +
+            (x - 1)
+        ];
+
+      integral[
+        y * integralWidth + x
+      ] =
+        integral[
+          (y - 1) * integralWidth +
+            x
+        ] + rowSum;
+    }
+  }
+
+  const output = Buffer.alloc(
+    width * height,
+    0
+  );
+
+  for (
+    let y = 0;
+    y < height;
+    y++
+  ) {
+    for (
+      let x = 0;
+      x < width;
+      x++
+    ) {
+      const x1 = Math.max(
+        0,
+        x - radius
+      );
+
+      const y1 = Math.max(
+        0,
+        y - radius
+      );
+
+      const x2 = Math.min(
+        width - 1,
+        x + radius
+      );
+
+      const y2 = Math.min(
+        height - 1,
+        y + radius
+      );
+
+      const area =
+        (x2 - x1 + 1) *
+        (y2 - y1 + 1);
+
+      const sum =
+        integral[
+          (y2 + 1) *
+            integralWidth +
+            (x2 + 1)
+        ] -
+        integral[
+          y1 * integralWidth +
+            (x2 + 1)
+        ] -
+        integral[
+          (y2 + 1) *
+            integralWidth +
+            x1
+        ] +
+        integral[
+          y1 * integralWidth +
+            x1
+        ];
+
+      if (sum === area) {
+        output[
+          y * width + x
+        ] = 255;
+      }
+    }
+  }
+
+  return sharp(output, {
+    raw: {
+      width,
+      height,
+      channels: 1,
+    },
+  })
+    .png()
+    .toBuffer();
 }
 
 // ============================================================
@@ -723,26 +867,25 @@ ${written.post}
 );
 
 // ============================================================
-// PRODUCT STAGING V2.2
+// PRODUCT STAGING V2.3
 // ============================================================
-//
-// V1.1:
-// background generation -> manual product composite
-//
-// V2:
-// product anchor -> OpenAI builds the whole environment
 //
 // V2.1:
 // sharp background -> real product composite
-// -> local edit only under product
+// -> local edit under product
 //
 // V2.2:
 // sharp background -> real product composite
-// -> local HALO edit around product
+// -> halo edit around product
 //
-// הרקע הרחוק נשאר מוגן וחד.
-// המוצר עצמו נשאר מוגן ואמיתי.
-// ה-AI יכול לערוך רק אזור מוגבל סביב המוצר כדי לחבר אותו לסצנה.
+// V2.3:
+// sharp background -> real product composite
+// -> halo + thin editable edge ring
+// -> restore protected product interior after edit
+//
+// הרקע הרחוק נשאר חד ומוגן.
+// מרכז המוצר נשאר מקורי ומוגן.
+// רק קו מתאר דק מסביב למוצר והאזור הקרוב אליו פתוחים לחיבור טבעי.
 //
 // ============================================================
 
@@ -771,11 +914,6 @@ app.post(
           req.file.path
         );
 
-      // ======================================================
-      // STEP 1
-      // Normalize source image
-      // ======================================================
-
       const originalBuffer =
         await sharp(rawBuffer)
           .resize(1600, 1600, {
@@ -786,11 +924,6 @@ app.post(
             quality: 95,
           })
           .toBuffer();
-
-      // ======================================================
-      // STEP 2
-      // Extract the REAL product
-      // ======================================================
 
       const cutoutBuffer =
         await removeBackground(
@@ -809,11 +942,6 @@ app.post(
           })
           .png()
           .toBuffer();
-
-      // ======================================================
-      // STEP 3
-      // Size and position the real product
-      // ======================================================
 
       const canvasSize = 1024;
 
@@ -875,11 +1003,6 @@ app.post(
           contactY -
             productHeight
         );
-
-      // ======================================================
-      // STEP 4
-      // Generate a SHARP background without the product
-      // ======================================================
 
       const requestedScene =
         hasUserPrompt
@@ -945,7 +1068,7 @@ Square 1:1 composition.
           );
       } catch {
         console.log(
-          "PRODUCT STAGING V2.2 - invalid background response:",
+          "PRODUCT STAGING V2.3 - invalid background response:",
           backgroundRawText
         );
 
@@ -959,7 +1082,7 @@ Square 1:1 composition.
 
       if (!backgroundResponse.ok) {
         console.log(
-          "PRODUCT STAGING V2.2 BACKGROUND ERROR:",
+          "PRODUCT STAGING V2.3 BACKGROUND ERROR:",
           JSON.stringify(
             backgroundData
           )
@@ -982,13 +1105,6 @@ Square 1:1 composition.
           ?.b64_json;
 
       if (!backgroundB64) {
-        console.log(
-          "PRODUCT STAGING V2.2 - no background image returned:",
-          JSON.stringify(
-            backgroundData
-          )
-        );
-
         return res
           .status(500)
           .json({
@@ -1014,11 +1130,6 @@ Square 1:1 composition.
           .png()
           .toBuffer();
 
-      // ======================================================
-      // STEP 5
-      // Composite the REAL product
-      // ======================================================
-
       const productComposite =
         await sharp(backgroundBuffer)
           .composite([
@@ -1036,23 +1147,11 @@ Square 1:1 composition.
           .png()
           .toBuffer();
 
-      // ======================================================
-      // STEP 6
-      // Build V2.2 HALO edit mask
-      // ======================================================
-      //
-      // Transparent = editable.
-      // Opaque = protected.
-      //
-      // פותחים אזור מוגבל מסביב למוצר,
-      // ואז מכסים מחדש את המוצר עצמו כדי שלא ישתנה.
-      //
-      // ======================================================
-
-      const haloLeftPadding = 85;
-      const haloRightPadding = 85;
-      const haloTopPadding = 55;
-      const haloBottomPadding = 95;
+      const haloLeftPadding = 70;
+      const haloRightPadding = 70;
+      const haloTopPadding = 42;
+      const haloBottomPadding = 90;
+      const edgeBlendRadius = 10;
 
       const haloLeft =
         Math.max(
@@ -1083,10 +1182,6 @@ Square 1:1 composition.
             haloBottomPadding
         );
 
-      const haloWidth =
-        haloRight -
-        haloLeft;
-
       const haloHeight =
         haloBottom -
         haloTop;
@@ -1114,7 +1209,6 @@ Square 1:1 composition.
 
       const maskParts = [];
 
-      // Protect everything above the halo.
       if (haloTop > 0) {
         maskParts.push({
           input:
@@ -1128,7 +1222,6 @@ Square 1:1 composition.
         });
       }
 
-      // Protect everything below the halo.
       if (haloBottom < canvasSize) {
         maskParts.push({
           input:
@@ -1144,7 +1237,6 @@ Square 1:1 composition.
         });
       }
 
-      // Protect left side of halo.
       if (haloLeft > 0) {
         maskParts.push({
           input:
@@ -1159,7 +1251,6 @@ Square 1:1 composition.
         });
       }
 
-      // Protect right side of halo.
       if (haloRight < canvasSize) {
         maskParts.push({
           input:
@@ -1177,27 +1268,36 @@ Square 1:1 composition.
         });
       }
 
-      // Protect the REAL product itself.
-      const protectedProduct =
-        await sharp(
-          resizedProduct
-        )
-          .ensureAlpha()
-          .removeAlpha()
+      const erodedAlpha =
+        await createErodedAlphaMask(
+          resizedProduct,
+          edgeBlendRadius
+        );
+
+      const protectedProductInterior =
+        await sharp({
+          create: {
+            width:
+              productWidth,
+            height:
+              productHeight,
+            channels: 3,
+            background: {
+              r: 255,
+              g: 255,
+              b: 255,
+            },
+          },
+        })
           .joinChannel(
-            await sharp(
-              resizedProduct
-            )
-              .ensureAlpha()
-              .extractChannel("alpha")
-              .toBuffer()
+            erodedAlpha
           )
           .png()
           .toBuffer();
 
       maskParts.push({
         input:
-          protectedProduct,
+          protectedProductInterior,
 
         left:
           productLeft,
@@ -1206,7 +1306,7 @@ Square 1:1 composition.
           productTop,
       });
 
-      const haloEditMask =
+      const edgeEditMask =
         await sharp({
           create: {
             width: canvasSize,
@@ -1225,55 +1325,58 @@ Square 1:1 composition.
           .png()
           .toBuffer();
 
-      // ======================================================
-      // STEP 7
-      // V2.2 local halo integration edit
-      // ======================================================
-
       const integrationPrompt = `
 This image already contains the REAL advertised product placed on a finished sharp commercial background.
 
-EDIT ONLY THE TRANSPARENT HALO AREA IMMEDIATELY AROUND THE EXISTING PRODUCT.
+EDIT ONLY THE TRANSPARENT LOCAL AREA AROUND THE PRODUCT AND THE VERY THIN TRANSPARENT EDGE RING AROUND ITS SILHOUETTE.
 
-The product itself is protected and must remain unchanged.
+The central product area is protected and must remain unchanged.
 The distant background is protected and must remain unchanged.
 
 GOAL:
 
 Make the existing real product look physically photographed inside the existing environment instead of pasted onto it.
 
-PHYSICAL INTEGRATION:
+PRODUCT IDENTITY PROTECTION:
 
-- Preserve the exact existing product.
+- Preserve the exact existing product identity.
 - Do not replace or redesign the product.
-- Do not change its packaging.
-- Do not change its logo.
-- Do not change its label.
-- Do not change its text.
-- Do not change its colors.
-- Do not change its shape or proportions.
+- Do not invent packaging.
+- Do not alter the logo.
+- Do not alter readable label text.
+- Do not alter brand colors.
+- Do not change product shape or proportions.
 - Do not create another product.
+- The editable edge ring is only for subtle photographic integration, not redesign.
+
+EDGE INTEGRATION:
+
+- Remove the hard PNG cutout feeling at the silhouette boundary.
+- Blend only the very outer edge naturally with the local scene lighting.
+- Preserve sharp believable product edges; do not make them fuzzy.
+- Add subtle environmental light wrap where physically appropriate.
+- Add subtle reflected color from the nearby environment onto the outermost product edge.
+- Match local contrast and exposure at the product boundary.
+- Do not blur the product.
+- Do not smear text or graphics.
+
+PHYSICAL CONTACT:
 
 - Create a realistic tight contact shadow beginning exactly at the product base.
 - Add subtle ambient occlusion where the product touches the support surface.
-- Create believable soft secondary shadow immediately beside the product where physically appropriate.
-- Match the local shadow direction to the existing scene lighting.
-- Match the local shadow softness to the existing light source.
-- Match the scene color temperature around the product.
-- Add subtle realistic reflected light and environmental color spill immediately around the product.
-- Preserve the existing surface texture and perspective.
-- Make the support surface visually continue naturally around the base of the product.
-- Remove any visible cutout or pasted-on feeling around the lower and side edges.
-- Keep all integration subtle and photographic.
+- Add a believable soft secondary shadow only where physically appropriate.
+- Match shadow direction, softness and density to the existing scene lighting.
+- Preserve the support surface texture and perspective.
+- Make the support surface visually continue naturally around the product base.
 
 BACKGROUND PROTECTION:
 
 - Do not blur the existing background.
 - Do not add bokeh.
 - Do not soften distant objects.
-- Do not redesign the kitchen, room, garden, furniture, architecture or props.
+- Do not redesign the room, furniture, architecture or props.
 - Do not add new objects.
-- Do not change the composition outside the local editable halo.
+- Do not change composition outside the local editable area.
 
 The final image must look like the real product was physically present when the photograph was taken.
 `;
@@ -1281,7 +1384,7 @@ The final image must look like the real product was physically present when the 
       const editResponse =
         await editProductSceneWithRetry(
           productComposite,
-          haloEditMask,
+          edgeEditMask,
           integrationPrompt
         );
 
@@ -1297,7 +1400,7 @@ The final image must look like the real product was physically present when the 
           );
       } catch {
         console.log(
-          "PRODUCT STAGING V2.2 - invalid halo edit response:",
+          "PRODUCT STAGING V2.3 - invalid edge edit response:",
           rawResponseText
         );
 
@@ -1311,7 +1414,7 @@ The final image must look like the real product was physically present when the 
 
       if (!editResponse.ok) {
         console.log(
-          "PRODUCT STAGING V2.2 HALO EDIT ERROR:",
+          "PRODUCT STAGING V2.3 EDGE EDIT ERROR:",
           JSON.stringify(
             editData
           )
@@ -1334,13 +1437,6 @@ The final image must look like the real product was physically present when the 
           ?.b64_json;
 
       if (!editedB64) {
-        console.log(
-          "PRODUCT STAGING V2.2 - no halo edit image returned:",
-          JSON.stringify(
-            editData
-          )
-        );
-
         return res
           .status(500)
           .json({
@@ -1349,7 +1445,7 @@ The final image must look like the real product was physically present when the 
           });
       }
 
-      const finalBuffer =
+      const editedBuffer =
         await sharp(
           Buffer.from(
             editedB64,
@@ -1366,6 +1462,36 @@ The final image must look like the real product was physically present when the 
           .png()
           .toBuffer();
 
+      const preservedProductInterior =
+        await sharp(
+          resizedProduct
+        )
+          .removeAlpha()
+          .joinChannel(
+            erodedAlpha
+          )
+          .png()
+          .toBuffer();
+
+      const finalBuffer =
+        await sharp(
+          editedBuffer
+        )
+          .composite([
+            {
+              input:
+                preservedProductInterior,
+
+              left:
+                productLeft,
+
+              top:
+                productTop,
+            },
+          ])
+          .png()
+          .toBuffer();
+
       res.json({
         image:
           `data:image/png;base64,${finalBuffer.toString(
@@ -1373,7 +1499,7 @@ The final image must look like the real product was physically present when the 
           )}`,
 
         stagingVersion:
-          "v2.2-sharp-background-halo-integration-edit",
+          "v2.3-sharp-background-edge-integration",
       });
 
       try {
@@ -1395,7 +1521,7 @@ The final image must look like the real product was physically present when the 
       }
     } catch (error) {
       console.log(
-        "PRODUCT STAGING V2.2 ERROR:",
+        "PRODUCT STAGING V2.3 ERROR:",
         error
       );
 
@@ -1664,7 +1790,7 @@ app.listen(
     );
 
     console.log(
-      "🖼️ Product Staging V2.2: Sharp Background + Halo Integration Edit"
+      "🖼️ Product Staging V2.3: Sharp Background + Edge Integration"
     );
   }
 );
