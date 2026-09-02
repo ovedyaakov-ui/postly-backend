@@ -197,8 +197,8 @@ async function removeBackground(
 }
 
 // ============================================================
-// PRODUCT STAGING V2.1
-// OPENAI BACKGROUND GENERATION + LOCAL IMAGE EDIT
+// PRODUCT STAGING V2.2
+// OPENAI BACKGROUND GENERATION + LOCAL HALO IMAGE EDIT
 // ============================================================
 
 async function generateProductBackgroundWithRetry(
@@ -271,11 +271,6 @@ async function generateProductBackgroundWithRetry(
     new Error("Product background generation failed after retries");
 }
 
-// ============================================================
-// PRODUCT STAGING V2
-// OPENAI IMAGE EDIT
-// ============================================================
-
 async function editProductSceneWithRetry(
   imageBuffer,
   maskBuffer,
@@ -291,21 +286,18 @@ async function editProductSceneWithRetry(
       form.append("model", "gpt-image-1");
 
       form.append("image", imageBuffer, {
-        filename: "product-anchor.png",
+        filename: "product-composite.png",
         contentType: "image/png",
       });
 
       form.append("mask", maskBuffer, {
-        filename: "product-mask.png",
+        filename: "product-halo-mask.png",
         contentType: "image/png",
       });
 
       form.append("prompt", prompt);
-
       form.append("size", "1024x1024");
-
       form.append("quality", "high");
-
       form.append("input_fidelity", "high");
 
       const response = await fetch(
@@ -331,7 +323,7 @@ async function editProductSceneWithRetry(
         attempt < maxRetries
       ) {
         console.log(
-          `Product Staging V2 failed (status ${response.status}), attempt ${attempt}/${maxRetries}. Retrying...`
+          `Product Staging V2.2 failed (status ${response.status}), attempt ${attempt}/${maxRetries}. Retrying...`
         );
 
         await new Promise((resolve) =>
@@ -346,7 +338,7 @@ async function editProductSceneWithRetry(
       lastError = err;
 
       console.log(
-        `Product Staging V2 threw error, attempt ${attempt}/${maxRetries}:`,
+        `Product Staging V2.2 threw error, attempt ${attempt}/${maxRetries}:`,
         err.message
       );
 
@@ -361,7 +353,7 @@ async function editProductSceneWithRetry(
   }
 
   throw lastError ||
-    new Error("Product Staging V2 failed after retries");
+    new Error("Product Staging V2.2 failed after retries");
 }
 
 // ============================================================
@@ -731,7 +723,7 @@ ${written.post}
 );
 
 // ============================================================
-// PRODUCT STAGING V2.1
+// PRODUCT STAGING V2.2
 // ============================================================
 //
 // V1.1:
@@ -741,11 +733,16 @@ ${written.post}
 // product anchor -> OpenAI builds the whole environment
 //
 // V2.1:
-// sharp background generation -> real product composite
-// -> local OpenAI edit ONLY at the product/support contact area
+// sharp background -> real product composite
+// -> local edit only under product
 //
-// המטרה: לשמור את הרקע חד, לשמור את המוצר האמיתי,
-// ולתת ל-AI ליצור רק את החיבור הפיזי באזור המגע.
+// V2.2:
+// sharp background -> real product composite
+// -> local HALO edit around product
+//
+// הרקע הרחוק נשאר מוגן וחד.
+// המוצר עצמו נשאר מוגן ואמיתי.
+// ה-AI יכול לערוך רק אזור מוגבל סביב המוצר כדי לחבר אותו לסצנה.
 //
 // ============================================================
 
@@ -800,7 +797,6 @@ app.post(
           originalBuffer
         );
 
-      // הסרת שטח שקוף מיותר מסביב למוצר.
       const trimmedCutout =
         await sharp(cutoutBuffer)
           .trim({
@@ -949,7 +945,7 @@ Square 1:1 composition.
           );
       } catch {
         console.log(
-          "PRODUCT STAGING V2.1 - invalid background response:",
+          "PRODUCT STAGING V2.2 - invalid background response:",
           backgroundRawText
         );
 
@@ -963,7 +959,7 @@ Square 1:1 composition.
 
       if (!backgroundResponse.ok) {
         console.log(
-          "PRODUCT STAGING V2.1 BACKGROUND ERROR:",
+          "PRODUCT STAGING V2.2 BACKGROUND ERROR:",
           JSON.stringify(
             backgroundData
           )
@@ -987,7 +983,7 @@ Square 1:1 composition.
 
       if (!backgroundB64) {
         console.log(
-          "PRODUCT STAGING V2.1 - no background image returned:",
+          "PRODUCT STAGING V2.2 - no background image returned:",
           JSON.stringify(
             backgroundData
           )
@@ -1020,7 +1016,7 @@ Square 1:1 composition.
 
       // ======================================================
       // STEP 5
-      // Composite the REAL product over the sharp background
+      // Composite the REAL product
       // ======================================================
 
       const productComposite =
@@ -1042,53 +1038,69 @@ Square 1:1 composition.
 
       // ======================================================
       // STEP 6
-      // Build a LOCAL edit mask only under the product
+      // Build V2.2 HALO edit mask
       // ======================================================
       //
-      // Opaque mask = protected area.
-      // Transparent mask = area OpenAI may edit.
+      // Transparent = editable.
+      // Opaque = protected.
       //
-      // רוב הרקע והמוצר מוגנים.
-      // רק פס קטן מתחת למוצר פתוח לעריכת צל ומגע.
+      // פותחים אזור מוגבל מסביב למוצר,
+      // ואז מכסים מחדש את המוצר עצמו כדי שלא ישתנה.
       //
       // ======================================================
 
-      const editPaddingX = 70;
-      const editBandHeight = 58;
+      const haloLeftPadding = 85;
+      const haloRightPadding = 85;
+      const haloTopPadding = 55;
+      const haloBottomPadding = 95;
 
-      const editLeft =
+      const haloLeft =
         Math.max(
           0,
           productLeft -
-            editPaddingX
+            haloLeftPadding
         );
 
-      const editWidth =
-        Math.min(
-          canvasSize -
-            editLeft,
-          productWidth +
-            editPaddingX * 2
-        );
-
-      const editTop =
+      const haloTop =
         Math.max(
           0,
-          contactY
+          productTop -
+            haloTopPadding
         );
 
-      const editHeight =
+      const haloRight =
         Math.min(
-          editBandHeight,
-          canvasSize - editTop
+          canvasSize,
+          productLeft +
+            productWidth +
+            haloRightPadding
         );
 
-      const opaqueMaskPiece = async (width, height) =>
+      const haloBottom =
+        Math.min(
+          canvasSize,
+          contactY +
+            haloBottomPadding
+        );
+
+      const haloWidth =
+        haloRight -
+        haloLeft;
+
+      const haloHeight =
+        haloBottom -
+        haloTop;
+
+      const opaqueMaskPiece = async (
+        width,
+        height
+      ) =>
         sharp({
           create: {
             width,
             height,
             channels: 4,
+
             background: {
               r: 255,
               g: 255,
@@ -1102,59 +1114,99 @@ Square 1:1 composition.
 
       const maskParts = [];
 
-      if (editTop > 0) {
+      // Protect everything above the halo.
+      if (haloTop > 0) {
         maskParts.push({
           input:
             await opaqueMaskPiece(
               canvasSize,
-              editTop
+              haloTop
             ),
+
           left: 0,
           top: 0,
         });
       }
 
-      if (editTop + editHeight < canvasSize) {
+      // Protect everything below the halo.
+      if (haloBottom < canvasSize) {
         maskParts.push({
           input:
             await opaqueMaskPiece(
               canvasSize,
               canvasSize -
-                (editTop + editHeight)
+                haloBottom
             ),
+
           left: 0,
           top:
-            editTop + editHeight,
+            haloBottom,
         });
       }
 
-      if (editLeft > 0) {
+      // Protect left side of halo.
+      if (haloLeft > 0) {
         maskParts.push({
           input:
             await opaqueMaskPiece(
-              editLeft,
-              editHeight
+              haloLeft,
+              haloHeight
             ),
+
           left: 0,
-          top: editTop,
+          top:
+            haloTop,
         });
       }
 
-      if (editLeft + editWidth < canvasSize) {
+      // Protect right side of halo.
+      if (haloRight < canvasSize) {
         maskParts.push({
           input:
             await opaqueMaskPiece(
               canvasSize -
-                (editLeft + editWidth),
-              editHeight
+                haloRight,
+              haloHeight
             ),
+
           left:
-            editLeft + editWidth,
-          top: editTop,
+            haloRight,
+
+          top:
+            haloTop,
         });
       }
 
-      const localEditMask =
+      // Protect the REAL product itself.
+      const protectedProduct =
+        await sharp(
+          resizedProduct
+        )
+          .ensureAlpha()
+          .removeAlpha()
+          .joinChannel(
+            await sharp(
+              resizedProduct
+            )
+              .ensureAlpha()
+              .extractChannel("alpha")
+              .toBuffer()
+          )
+          .png()
+          .toBuffer();
+
+      maskParts.push({
+        input:
+          protectedProduct,
+
+        left:
+          productLeft,
+
+        top:
+          productTop,
+      });
+
+      const haloEditMask =
         await sharp({
           create: {
             width: canvasSize,
@@ -1175,37 +1227,61 @@ Square 1:1 composition.
 
       // ======================================================
       // STEP 7
-      // Local Image Edit: contact shadow only
+      // V2.2 local halo integration edit
       // ======================================================
 
       const integrationPrompt = `
 This image already contains the REAL advertised product placed on a finished sharp commercial background.
 
-EDIT ONLY THE SMALL TRANSPARENT MASKED AREA DIRECTLY UNDER THE PRODUCT.
+EDIT ONLY THE TRANSPARENT HALO AREA IMMEDIATELY AROUND THE EXISTING PRODUCT.
+
+The product itself is protected and must remain unchanged.
+The distant background is protected and must remain unchanged.
 
 GOAL:
-Create the physical contact between the existing real product and the existing support surface.
 
-RULES:
+Make the existing real product look physically photographed inside the existing environment instead of pasted onto it.
 
-- Do not redesign or replace the product.
-- Do not change the product packaging, logo, label, colors, shape or proportions.
-- Do not alter the background outside the editable masked area.
-- Do not blur the background.
-- Do not add bokeh.
-- Do not create new props or products.
-- Preserve the existing perspective and surface texture.
+PHYSICAL INTEGRATION:
+
+- Preserve the exact existing product.
+- Do not replace or redesign the product.
+- Do not change its packaging.
+- Do not change its logo.
+- Do not change its label.
+- Do not change its text.
+- Do not change its colors.
+- Do not change its shape or proportions.
+- Do not create another product.
+
 - Create a realistic tight contact shadow beginning exactly at the product base.
-- Add subtle ambient occlusion at the product/support contact edge.
-- Match the existing light direction, intensity and color temperature.
-- Keep the shadow physically plausible and subtle, not a floating drop shadow.
-- The result must make the product look physically grounded on the existing surface.
+- Add subtle ambient occlusion where the product touches the support surface.
+- Create believable soft secondary shadow immediately beside the product where physically appropriate.
+- Match the local shadow direction to the existing scene lighting.
+- Match the local shadow softness to the existing light source.
+- Match the scene color temperature around the product.
+- Add subtle realistic reflected light and environmental color spill immediately around the product.
+- Preserve the existing surface texture and perspective.
+- Make the support surface visually continue naturally around the base of the product.
+- Remove any visible cutout or pasted-on feeling around the lower and side edges.
+- Keep all integration subtle and photographic.
+
+BACKGROUND PROTECTION:
+
+- Do not blur the existing background.
+- Do not add bokeh.
+- Do not soften distant objects.
+- Do not redesign the kitchen, room, garden, furniture, architecture or props.
+- Do not add new objects.
+- Do not change the composition outside the local editable halo.
+
+The final image must look like the real product was physically present when the photograph was taken.
 `;
 
       const editResponse =
         await editProductSceneWithRetry(
           productComposite,
-          localEditMask,
+          haloEditMask,
           integrationPrompt
         );
 
@@ -1221,7 +1297,7 @@ RULES:
           );
       } catch {
         console.log(
-          "PRODUCT STAGING V2.1 - invalid local edit response:",
+          "PRODUCT STAGING V2.2 - invalid halo edit response:",
           rawResponseText
         );
 
@@ -1235,7 +1311,7 @@ RULES:
 
       if (!editResponse.ok) {
         console.log(
-          "PRODUCT STAGING V2.1 LOCAL EDIT ERROR:",
+          "PRODUCT STAGING V2.2 HALO EDIT ERROR:",
           JSON.stringify(
             editData
           )
@@ -1259,7 +1335,7 @@ RULES:
 
       if (!editedB64) {
         console.log(
-          "PRODUCT STAGING V2.1 - no local edit image returned:",
+          "PRODUCT STAGING V2.2 - no halo edit image returned:",
           JSON.stringify(
             editData
           )
@@ -1297,7 +1373,7 @@ RULES:
           )}`,
 
         stagingVersion:
-          "v2.1-sharp-background-local-contact-edit",
+          "v2.2-sharp-background-halo-integration-edit",
       });
 
       try {
@@ -1319,7 +1395,7 @@ RULES:
       }
     } catch (error) {
       console.log(
-        "PRODUCT STAGING V2.1 ERROR:",
+        "PRODUCT STAGING V2.2 ERROR:",
         error
       );
 
@@ -1588,7 +1664,7 @@ app.listen(
     );
 
     console.log(
-      "🖼️ Product Staging V2.1: Sharp Background + Local Contact Edit"
+      "🖼️ Product Staging V2.2: Sharp Background + Halo Integration Edit"
     );
   }
 );
