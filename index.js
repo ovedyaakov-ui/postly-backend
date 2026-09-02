@@ -938,11 +938,14 @@ PHYSICAL INTEGRATION:
 - Build the table, counter, pedestal, tray, floor or other appropriate support around its current position.
 - The bottom of the existing product must make believable physical contact with the supporting surface.
 - The supporting surface must naturally continue behind and around the product.
-- Create realistic environmental contact shadow directly where the product meets the support.
-- Match the scene lighting direction to the existing product as closely as possible.
-- Use realistic reflected light around the product.
+- Create a realistic tight contact shadow directly under and immediately around the product where it meets the support.
+- The contact shadow must begin at the product base with no visible gap, so the product feels physically grounded.
+- Add subtle ambient occlusion at the exact contact edge between product and support.
+- Match the scene lighting direction, intensity and color temperature to the existing product as closely as possible.
+- Use realistic reflected light and color spill from the environment onto the area immediately surrounding the product.
 - Use realistic perspective.
 - Use realistic scale.
+- The support surface, contact shadow and nearby lighting must visually connect the real product to the generated scene.
 - The product must not look pasted, floating or composited.
 
 COMPOSITION:
@@ -963,8 +966,16 @@ IMAGE QUALITY:
 - Natural believable materials.
 - Detailed environment.
 - Sharp product area.
-- Natural depth of field.
-- Avoid excessive blur.
+- DEEP FOCUS PHOTOGRAPHY.
+- Keep the foreground, support surface, nearby props and background environment detailed and recognizable.
+- Preserve visible texture, edges and material detail throughout the scene.
+- Use a small-aperture deep-focus look similar to f/11.
+- NO HEAVY BLUR.
+- NO STRONG BOKEH.
+- NO EXTREME SHALLOW DEPTH OF FIELD.
+- NO SOFT OR SMEARED BACKGROUND.
+- Do not use background blur as the main way to separate the product from the scene.
+- Keep the product dominant through composition, lighting, contrast and placement instead.
 - Avoid artificial CGI appearance.
 - Avoid obvious AI artifacts.
 
