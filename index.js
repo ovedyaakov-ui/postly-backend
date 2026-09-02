@@ -197,6 +197,81 @@ async function removeBackground(
 }
 
 // ============================================================
+// PRODUCT STAGING V2.1
+// OPENAI BACKGROUND GENERATION + LOCAL IMAGE EDIT
+// ============================================================
+
+async function generateProductBackgroundWithRetry(
+  prompt,
+  { maxRetries = 3, retryDelayMs = 1500 } = {}
+) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(
+        "https://api.openai.com/v1/images/generations",
+        {
+          method: "POST",
+
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${OPENAI_API_KEY}`,
+          },
+
+          body: JSON.stringify({
+            model: "gpt-image-1",
+            prompt,
+            size: "1024x1024",
+            quality: "high",
+            output_format: "png",
+          }),
+        }
+      );
+
+      const isRetryableStatus =
+        response.status === 429 || response.status >= 500;
+
+      if (
+        !response.ok &&
+        isRetryableStatus &&
+        attempt < maxRetries
+      ) {
+        console.log(
+          `Product background generation failed (status ${response.status}), attempt ${attempt}/${maxRetries}. Retrying...`
+        );
+
+        await new Promise((resolve) =>
+          setTimeout(resolve, retryDelayMs * attempt)
+        );
+
+        continue;
+      }
+
+      return response;
+    } catch (err) {
+      lastError = err;
+
+      console.log(
+        `Product background generation threw error, attempt ${attempt}/${maxRetries}:`,
+        err.message
+      );
+
+      if (attempt < maxRetries) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, retryDelayMs * attempt)
+        );
+
+        continue;
+      }
+    }
+  }
+
+  throw lastError ||
+    new Error("Product background generation failed after retries");
+}
+
+// ============================================================
 // PRODUCT STAGING V2
 // OPENAI IMAGE EDIT
 // ============================================================
@@ -656,19 +731,21 @@ ${written.post}
 );
 
 // ============================================================
-// PRODUCT STAGING V2
+// PRODUCT STAGING V2.1
 // ============================================================
 //
 // V1.1:
 // background generation -> manual product composite
 //
 // V2:
-// real product cutout -> product anchor canvas
-// -> OpenAI IMAGE EDIT builds the scene AROUND the real product
+// product anchor -> OpenAI builds the whole environment
 //
-// המוצר נמצא בתוך תמונת הקלט של המודל.
-// מסכה מגנה על המוצר.
-// ה-AI יוצר את הסביבה סביבו.
+// V2.1:
+// sharp background generation -> real product composite
+// -> local OpenAI edit ONLY at the product/support contact area
+//
+// המטרה: לשמור את הרקע חד, לשמור את המוצר האמיתי,
+// ולתת ל-AI ליצור רק את החיבור הפיזי באזור המגע.
 //
 // ============================================================
 
@@ -739,12 +816,11 @@ app.post(
 
       // ======================================================
       // STEP 3
-      // Build the product anchor canvas
+      // Size and position the real product
       // ======================================================
 
       const canvasSize = 1024;
 
-      // V2 משאיר מספיק מקום ל-AI לבנות סביבה אמיתית סביב המוצר.
       const maxProductWidth =
         Math.round(
           canvasSize * 0.46
@@ -792,8 +868,6 @@ app.post(
             2
         );
 
-      // המוצר יושב באזור תחתון-מרכזי,
-      // אבל ה-AI רואה אותו לפני שהוא יוצר את הסביבה.
       const contactY =
         Math.round(
           canvasSize * 0.79
@@ -806,22 +880,151 @@ app.post(
             productHeight
         );
 
-      // קנבס שקוף שעליו נמצא המוצר האמיתי.
-      const anchorCanvas =
-        await sharp({
-          create: {
-            width: canvasSize,
-            height: canvasSize,
-            channels: 4,
+      // ======================================================
+      // STEP 4
+      // Generate a SHARP background without the product
+      // ======================================================
 
-            background: {
-              r: 0,
-              g: 0,
-              b: 0,
-              alpha: 0,
-            },
-          },
-        })
+      const requestedScene =
+        hasUserPrompt
+          ? userPrompt.trim()
+          : `a clean professional commercial advertising environment naturally suitable for ${
+              description ||
+              "this product"
+            }`;
+
+      const backgroundPrompt = `
+Create a highly realistic professional commercial product photography BACKGROUND ONLY.
+
+SCENE REQUEST:
+${requestedScene}
+
+IMPORTANT COMPOSITION:
+
+- Do NOT generate the advertised product.
+- Do NOT generate packaging, boxes or another competing hero product.
+- Leave a clean empty hero area in the lower center of the image for a real product that will be added later.
+- The product will stand on a physical support surface with its bottom at approximately 79% of the image height.
+- Build the table, counter, pedestal, floor or other suitable support so that this lower-center contact position makes physical sense.
+- Keep the support surface clearly visible under the future product position.
+
+FOCUS AND IMAGE QUALITY:
+
+- Photorealistic commercial photography.
+- Premium advertising quality.
+- DEEP FOCUS PHOTOGRAPHY.
+- Keep foreground, support surface, props and background detailed and recognizable.
+- Preserve visible texture, edges and material detail throughout the scene.
+- Use a small-aperture deep-focus look similar to f/11.
+- NO HEAVY BLUR.
+- NO STRONG BOKEH.
+- NO EXTREME SHALLOW DEPTH OF FIELD.
+- NO SOFT OR SMEARED BACKGROUND.
+- Do not use background blur as the main visual effect.
+- Natural believable materials.
+- Realistic perspective and scale.
+- No advertising text.
+- No fake logos.
+- No watermark.
+- Avoid artificial CGI appearance.
+- Avoid obvious AI artifacts.
+
+Square 1:1 composition.
+`;
+
+      const backgroundResponse =
+        await generateProductBackgroundWithRetry(
+          backgroundPrompt
+        );
+
+      const backgroundRawText =
+        await backgroundResponse.text();
+
+      let backgroundData;
+
+      try {
+        backgroundData =
+          JSON.parse(
+            backgroundRawText
+          );
+      } catch {
+        console.log(
+          "PRODUCT STAGING V2.1 - invalid background response:",
+          backgroundRawText
+        );
+
+        return res
+          .status(500)
+          .json({
+            error:
+              "OpenAI החזיר תשובה לא תקינה ביצירת הרקע",
+          });
+      }
+
+      if (!backgroundResponse.ok) {
+        console.log(
+          "PRODUCT STAGING V2.1 BACKGROUND ERROR:",
+          JSON.stringify(
+            backgroundData
+          )
+        );
+
+        return res
+          .status(
+            backgroundResponse.status
+          )
+          .json({
+            error:
+              backgroundData?.error
+                ?.message ||
+              "שגיאה ביצירת הרקע",
+          });
+      }
+
+      const backgroundB64 =
+        backgroundData?.data?.[0]
+          ?.b64_json;
+
+      if (!backgroundB64) {
+        console.log(
+          "PRODUCT STAGING V2.1 - no background image returned:",
+          JSON.stringify(
+            backgroundData
+          )
+        );
+
+        return res
+          .status(500)
+          .json({
+            error:
+              "לא התקבלה תמונת רקע מ-OpenAI",
+          });
+      }
+
+      const backgroundBuffer =
+        await sharp(
+          Buffer.from(
+            backgroundB64,
+            "base64"
+          )
+        )
+          .resize(
+            canvasSize,
+            canvasSize,
+            {
+              fit: "cover",
+            }
+          )
+          .png()
+          .toBuffer();
+
+      // ======================================================
+      // STEP 5
+      // Composite the REAL product over the sharp background
+      // ======================================================
+
+      const productComposite =
+        await sharp(backgroundBuffer)
           .composite([
             {
               input:
@@ -838,30 +1041,120 @@ app.post(
           .toBuffer();
 
       // ======================================================
-      // STEP 4
-      // Build protection mask
+      // STEP 6
+      // Build a LOCAL edit mask only under the product
       // ======================================================
       //
+      // Opaque mask = protected area.
       // Transparent mask = area OpenAI may edit.
-      // Product area = protected.
       //
-      // אנחנו לא מבקשים מה-AI לצייר מחדש את המוצר.
+      // רוב הרקע והמוצר מוגנים.
+      // רק פס קטן מתחת למוצר פתוח לעריכת צל ומגע.
       //
       // ======================================================
 
-      const whiteProduct =
-        await sharp(
-          resizedProduct
-        )
-          .tint({
-            r: 255,
-            g: 255,
-            b: 255,
-          })
+      const editPaddingX = 70;
+      const editBandHeight = 58;
+
+      const editLeft =
+        Math.max(
+          0,
+          productLeft -
+            editPaddingX
+        );
+
+      const editWidth =
+        Math.min(
+          canvasSize -
+            editLeft,
+          productWidth +
+            editPaddingX * 2
+        );
+
+      const editTop =
+        Math.max(
+          0,
+          contactY
+        );
+
+      const editHeight =
+        Math.min(
+          editBandHeight,
+          canvasSize - editTop
+        );
+
+      const opaqueMaskPiece = async (width, height) =>
+        sharp({
+          create: {
+            width,
+            height,
+            channels: 4,
+            background: {
+              r: 255,
+              g: 255,
+              b: 255,
+              alpha: 1,
+            },
+          },
+        })
           .png()
           .toBuffer();
 
-      const maskCanvas =
+      const maskParts = [];
+
+      if (editTop > 0) {
+        maskParts.push({
+          input:
+            await opaqueMaskPiece(
+              canvasSize,
+              editTop
+            ),
+          left: 0,
+          top: 0,
+        });
+      }
+
+      if (editTop + editHeight < canvasSize) {
+        maskParts.push({
+          input:
+            await opaqueMaskPiece(
+              canvasSize,
+              canvasSize -
+                (editTop + editHeight)
+            ),
+          left: 0,
+          top:
+            editTop + editHeight,
+        });
+      }
+
+      if (editLeft > 0) {
+        maskParts.push({
+          input:
+            await opaqueMaskPiece(
+              editLeft,
+              editHeight
+            ),
+          left: 0,
+          top: editTop,
+        });
+      }
+
+      if (editLeft + editWidth < canvasSize) {
+        maskParts.push({
+          input:
+            await opaqueMaskPiece(
+              canvasSize -
+                (editLeft + editWidth),
+              editHeight
+            ),
+          left:
+            editLeft + editWidth,
+          top: editTop,
+        });
+      }
+
+      const localEditMask =
         await sharp({
           create: {
             width: canvasSize,
@@ -876,124 +1169,44 @@ app.post(
             },
           },
         })
-          .composite([
-            {
-              input:
-                whiteProduct,
-
-              left:
-                productLeft,
-
-              top:
-                productTop,
-            },
-          ])
+          .composite(maskParts)
           .png()
           .toBuffer();
 
       // ======================================================
-      // STEP 5
-      // Scene request
-      // ======================================================
-
-      const requestedScene =
-        hasUserPrompt
-          ? userPrompt.trim()
-          : `a clean professional commercial advertising environment naturally suitable for ${
-              description ||
-              "this product"
-            }`;
-
-      // ======================================================
-      // STEP 6
-      // IMAGE EDIT PROMPT
-      // ======================================================
-
-      const editPrompt = `
-Create a highly realistic professional commercial product photograph.
-
-SCENE REQUEST:
-${requestedScene}
-
-IMPORTANT:
-The image already contains the REAL advertised product.
-
-The existing product is the hero subject and must remain exactly where it is.
-
-DO NOT replace the product.
-DO NOT redesign the product.
-DO NOT invent another product.
-DO NOT modify its packaging.
-DO NOT change its logo.
-DO NOT change its label.
-DO NOT change its colors.
-DO NOT change its proportions.
-DO NOT change its shape.
-
-BUILD THE ENTIRE ENVIRONMENT AROUND THE EXISTING PRODUCT.
-
-PHYSICAL INTEGRATION:
-
-- Treat the existing product as a real physical object already present in the scene.
-- Build the table, counter, pedestal, tray, floor or other appropriate support around its current position.
-- The bottom of the existing product must make believable physical contact with the supporting surface.
-- The supporting surface must naturally continue behind and around the product.
-- Create a realistic tight contact shadow directly under and immediately around the product where it meets the support.
-- The contact shadow must begin at the product base with no visible gap, so the product feels physically grounded.
-- Add subtle ambient occlusion at the exact contact edge between product and support.
-- Match the scene lighting direction, intensity and color temperature to the existing product as closely as possible.
-- Use realistic reflected light and color spill from the environment onto the area immediately surrounding the product.
-- Use realistic perspective.
-- Use realistic scale.
-- The support surface, contact shadow and nearby lighting must visually connect the real product to the generated scene.
-- The product must not look pasted, floating or composited.
-
-COMPOSITION:
-
-- Keep the existing product as the clear hero.
-- Build visual interest around it, not over it.
-- Props may appear naturally beside or behind the product.
-- Props must not hide important parts of the product.
-- Do not place another competing product in the scene.
-- Do not add advertising text.
-- Do not add fake logos.
-- Do not add watermarks.
-
-IMAGE QUALITY:
-
-- Photorealistic commercial photography.
-- Premium advertising quality.
-- Natural believable materials.
-- Detailed environment.
-- Sharp product area.
-- DEEP FOCUS PHOTOGRAPHY.
-- Keep the foreground, support surface, nearby props and background environment detailed and recognizable.
-- Preserve visible texture, edges and material detail throughout the scene.
-- Use a small-aperture deep-focus look similar to f/11.
-- NO HEAVY BLUR.
-- NO STRONG BOKEH.
-- NO EXTREME SHALLOW DEPTH OF FIELD.
-- NO SOFT OR SMEARED BACKGROUND.
-- Do not use background blur as the main way to separate the product from the scene.
-- Keep the product dominant through composition, lighting, contrast and placement instead.
-- Avoid artificial CGI appearance.
-- Avoid obvious AI artifacts.
-
-The final result must look like the real product was physically photographed inside this environment, not digitally pasted onto a generated background.
-
-Square 1:1 composition.
-`;
-
-      // ======================================================
       // STEP 7
-      // OpenAI Image Edit
+      // Local Image Edit: contact shadow only
       // ======================================================
+
+      const integrationPrompt = `
+This image already contains the REAL advertised product placed on a finished sharp commercial background.
+
+EDIT ONLY THE SMALL TRANSPARENT MASKED AREA DIRECTLY UNDER THE PRODUCT.
+
+GOAL:
+Create the physical contact between the existing real product and the existing support surface.
+
+RULES:
+
+- Do not redesign or replace the product.
+- Do not change the product packaging, logo, label, colors, shape or proportions.
+- Do not alter the background outside the editable masked area.
+- Do not blur the background.
+- Do not add bokeh.
+- Do not create new props or products.
+- Preserve the existing perspective and surface texture.
+- Create a realistic tight contact shadow beginning exactly at the product base.
+- Add subtle ambient occlusion at the product/support contact edge.
+- Match the existing light direction, intensity and color temperature.
+- Keep the shadow physically plausible and subtle, not a floating drop shadow.
+- The result must make the product look physically grounded on the existing surface.
+`;
 
       const editResponse =
         await editProductSceneWithRetry(
-          anchorCanvas,
-          maskCanvas,
-          editPrompt
+          productComposite,
+          localEditMask,
+          integrationPrompt
         );
 
       const rawResponseText =
@@ -1008,7 +1221,7 @@ Square 1:1 composition.
           );
       } catch {
         console.log(
-          "PRODUCT STAGING V2 - invalid OpenAI response:",
+          "PRODUCT STAGING V2.1 - invalid local edit response:",
           rawResponseText
         );
 
@@ -1016,15 +1229,13 @@ Square 1:1 composition.
           .status(500)
           .json({
             error:
-              "OpenAI החזיר תשובה לא תקינה",
+              "OpenAI החזיר תשובה לא תקינה בחיבור המוצר",
           });
       }
 
-      if (
-        !editResponse.ok
-      ) {
+      if (!editResponse.ok) {
         console.log(
-          "PRODUCT STAGING V2 OPENAI ERROR:",
+          "PRODUCT STAGING V2.1 LOCAL EDIT ERROR:",
           JSON.stringify(
             editData
           )
@@ -1038,7 +1249,7 @@ Square 1:1 composition.
             error:
               editData?.error
                 ?.message ||
-              "שגיאה ביצירת סביבת המוצר",
+              "שגיאה בחיבור המוצר לרקע",
           });
       }
 
@@ -1048,7 +1259,7 @@ Square 1:1 composition.
 
       if (!editedB64) {
         console.log(
-          "PRODUCT STAGING V2 - no image returned:",
+          "PRODUCT STAGING V2.1 - no local edit image returned:",
           JSON.stringify(
             editData
           )
@@ -1058,21 +1269,16 @@ Square 1:1 composition.
           .status(500)
           .json({
             error:
-              "לא התקבלה תמונה מ-OpenAI",
+              "לא התקבלה תמונה מ-OpenAI בחיבור המוצר",
           });
       }
 
-      const editedBuffer =
-        Buffer.from(
-          editedB64,
-          "base64"
-        );
-
-      // נורמליזציה סופית בלבד.
-      // אין כאן composite של המוצר.
       const finalBuffer =
         await sharp(
-          editedBuffer
+          Buffer.from(
+            editedB64,
+            "base64"
+          )
         )
           .resize(
             canvasSize,
@@ -1091,7 +1297,7 @@ Square 1:1 composition.
           )}`,
 
         stagingVersion:
-          "v2-image-edit-product-anchor",
+          "v2.1-sharp-background-local-contact-edit",
       });
 
       try {
@@ -1113,7 +1319,7 @@ Square 1:1 composition.
       }
     } catch (error) {
       console.log(
-        "PRODUCT STAGING V2 ERROR:",
+        "PRODUCT STAGING V2.1 ERROR:",
         error
       );
 
@@ -1382,7 +1588,7 @@ app.listen(
     );
 
     console.log(
-      "🖼️ Product Staging V2: Image Edit Product Anchor"
+      "🖼️ Product Staging V2.1: Sharp Background + Local Contact Edit"
     );
   }
 );
