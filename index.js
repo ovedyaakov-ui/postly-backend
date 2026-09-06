@@ -80,10 +80,12 @@ async function requireAuth(req, res, next) {
     }
 
     const decoded = await admin.auth().verifyIdToken(match[1]);
+    console.log("AUTH STEP 1 OK - uid:", decoded.uid);
     const uid = decoded.uid;
 
     const userRef = db.collection("users").doc(uid);
     const userSnap = await userRef.get();
+    console.log("AUTH STEP 2 FIRESTORE OK - exists:", userSnap.exists);
 
     if (!userSnap.exists) {
       const newUser = {
