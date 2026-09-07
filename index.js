@@ -9,6 +9,7 @@ import FormData from "form-data";
 import strategies from "./strategies.js";
 import { GoogleGenAI } from "@google/genai";
 import admin from "firebase-admin";
+import nodemailer from "nodemailer";
 
 const app = express();
 
@@ -78,6 +79,55 @@ const PLAN_BY_PRODUCT_ID = {
 // Integrations -> Webhooks -> Authorization header value). Requests to
 // /revenuecat-webhook are rejected unless they carry this exact value.
 const REVENUECAT_WEBHOOK_SECRET = process.env.REVENUECAT_WEBHOOK_SECRET;
+
+// ============================================================
+// ADMIN EMAIL NOTIFICATIONS
+// ============================================================
+//
+// Sends the owner an email for every RevenueCat webhook event - the full
+// log stays in Firestore either way, but this is the "don't need to open
+// Render Logs to know what's happening" channel.
+// ============================================================
+
+const GMAIL_USER = process.env.GMAIL_USER;
+const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD;
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
+
+const mailTransporter =
+  GMAIL_USER && GMAIL_APP_PASSWORD
+    ? nodemailer.createTransport({
+        service: "gmail",
+        auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD },
+      })
+    : null;
+
+/**
+ * Fire-and-forget admin notification email. Never throws - a failed email
+ * must never break webhook processing (the Firestore log is the source of
+ * truth; email is just a convenience notification on top of it).
+ */
+function sendAdminNotification(subject, bodyLines) {
+  if (!mailTransporter || !ADMIN_EMAIL) {
+    console.log(
+      "ADMIN EMAIL: skipped (GMAIL_USER/GMAIL_APP_PASSWORD/ADMIN_EMAIL not fully configured)"
+    );
+    return;
+  }
+
+  mailTransporter
+    .sendMail({
+      from: GMAIL_USER,
+      to: ADMIN_EMAIL,
+      subject: `PostlyAI | ${subject}`,
+      text: bodyLines.join("\n"),
+    })
+    .then(() => {
+      console.log("ADMIN EMAIL: sent -", subject);
+    })
+    .catch((err) => {
+      console.log("ADMIN EMAIL ERROR:", err.message);
+    });
+}
 
 /**
  * Verifies the Firebase ID Token from the Authorization header.
@@ -691,30 +741,52 @@ app.post("/revenuecat-webhook", async (req, res) => {
       return { noAction: true };
     });
 
+    let whatChanged = "no Firestore change";
     if (result.skipped === "duplicate event") {
       console.log(
         `REVENUECAT WEBHOOK: event ${eventId} already processed, skipping (retry)`
       );
+      whatChanged = "skipped - duplicate event (retry)";
     } else if (result.skipped === "unknown product") {
       console.log(
         "REVENUECAT WEBHOOK: unknown product_id, ignoring:",
         result.productId
       );
+      whatChanged = `skipped - unrecognized product_id (${result.productId})`;
     } else if (result.granted) {
       console.log(
         `REVENUECAT WEBHOOK: granted ${result.granted.credits} credits (${result.granted.plan}) to ${uid}`
       );
+      whatChanged = `plan set to "${result.granted.plan}", credits set to ${result.granted.credits}`;
     } else if (result.downgraded) {
       console.log(`REVENUECAT WEBHOOK: marked ${uid} as expired`);
+      whatChanged = 'plan set to "expired"';
     } else {
       console.log("REVENUECAT WEBHOOK: no action for event type", type);
     }
+
+    // Notify admin for every event, from TEST events to real purchases -
+    // full visibility without needing to open Render Logs.
+    sendAdminNotification(`${type} | ${productId || "no product"} | Success`, [
+      `Time: ${new Date().toISOString()}`,
+      `Event type: ${type}`,
+      `Event ID: ${eventId}`,
+      `Firebase UID: ${uid}`,
+      `Product ID: ${productId || "-"}`,
+      `Result: Success`,
+      `Firestore change: ${whatChanged}`,
+    ]);
 
     // Always 200 - RevenueCat retries on non-2xx responses, and we don't
     // want retries for event types we intentionally ignore.
     res.status(200).json({ received: true });
   } catch (error) {
     console.log("REVENUECAT WEBHOOK ERROR:", error);
+    sendAdminNotification("Webhook FAILED", [
+      `Time: ${new Date().toISOString()}`,
+      `Result: FAILURE`,
+      `Error: ${error.message || String(error)}`,
+    ]);
     res.status(500).json({ error: "Webhook processing failed" });
   }
 });
