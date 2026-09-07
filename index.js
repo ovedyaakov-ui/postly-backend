@@ -767,7 +767,31 @@ app.post("/revenuecat-webhook", async (req, res) => {
 
     // Notify admin for every event, from TEST events to real purchases -
     // full visibility without needing to open Render Logs.
-    sendAdminNotification(`${type} | ${productId || "no product"} | Success`, [
+    // Friendly plan name for the email subject (falls back to the raw
+    // product_id for products we don't recognize, e.g. RevenueCat's TEST
+    // event which sends "test_product").
+    const friendlyPlan =
+      PLAN_BY_PRODUCT_ID[productId]?.plan ||
+      (result.downgraded ? "" : productId || "");
+    const planLabel = friendlyPlan
+      ? friendlyPlan.charAt(0).toUpperCase() + friendlyPlan.slice(1)
+      : "";
+
+    const EVENT_LABELS_HE = {
+      TEST: "בדיקת חיבור",
+      INITIAL_PURCHASE: "רכישה חדשה",
+      RENEWAL: "מנוי חודש",
+      CANCELLATION: "מנוי בוטל (עדיין בתוקף עד סוף התקופה)",
+      EXPIRATION: "מנוי פג תוקף",
+      PRODUCT_CHANGE: "בקשת שינוי מסלול",
+      BILLING_ISSUE: "בעיית חיוב",
+    };
+    const eventLabel = EVENT_LABELS_HE[type] || type;
+    const subjectLine = planLabel
+      ? `${eventLabel} - ${planLabel}`
+      : eventLabel;
+
+    sendAdminNotification(subjectLine, [
       `Time: ${new Date().toISOString()}`,
       `Event type: ${type}`,
       `Event ID: ${eventId}`,
