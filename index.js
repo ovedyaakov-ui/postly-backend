@@ -64,6 +64,21 @@ const db = admin.firestore();
 const FREE_TRIAL_CREDITS = 2;
 const MAX_IMPROVES_PER_POST = 5;
 
+// Maps each Google Play / App Store product id to the plan name and the
+// number of credits a subscriber gets per billing cycle. Keep in sync with
+// PLAN_INFO in PaywallScreen.tsx (frontend) and the products created in
+// Google Play Console / App Store Connect.
+const PLAN_BY_PRODUCT_ID = {
+  "postly_starter_monthly:starter-monthly": { plan: "starter", credits: 30 },
+  "postly_pro_monthly:pro-monthly": { plan: "pro", credits: 100 },
+  "postly_business_monthly:business-monthly": { plan: "business", credits: 200 },
+};
+
+// Shared secret configured in the RevenueCat dashboard (Project Settings ->
+// Integrations -> Webhooks -> Authorization header value). Requests to
+// /revenuecat-webhook are rejected unless they carry this exact value.
+const REVENUECAT_WEBHOOK_SECRET = process.env.REVENUECAT_WEBHOOK_SECRET;
+
 /**
  * Verifies the Firebase ID Token from the Authorization header.
  * Attaches req.uid and req.userDoc (Firestore data, creating a fresh
@@ -539,6 +554,171 @@ app.get("/me", requireAuth, async (req, res) => {
     credits: req.userDoc.credits ?? 0,
   });
 });
+
+// ============================================================
+// REVENUECAT WEBHOOK
+// ============================================================
+//
+// Configured in the RevenueCat dashboard to POST here on every
+// subscription lifecycle event. This is the piece that actually credits
+// the user in Firestore after a real purchase - without it, a successful
+// purchase in the store does nothing on our side.
+//
+// Docs: https://www.revenuecat.com/docs/integrations/webhooks
+// ============================================================
+
+app.post("/revenuecat-webhook", async (req, res) => {
+  try {
+    // RevenueCat is configured to send this exact value in the
+    // Authorization header - reject anything else outright.
+    const authHeader = req.headers.authorization || "";
+    if (
+      !REVENUECAT_WEBHOOK_SECRET ||
+      authHeader !== `Bearer ${REVENUECAT_WEBHOOK_SECRET}`
+    ) {
+      console.log("REVENUECAT WEBHOOK: rejected, bad/missing auth header");
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const event = req.body?.event;
+    if (!event) {
+      return res.status(400).json({ error: "Missing event" });
+    }
+
+    const { type, id: eventId, app_user_id: uid, product_id: productId } = event;
+    console.log(
+      "REVENUECAT WEBHOOK:",
+      type,
+      "event id:",
+      eventId,
+      "uid:",
+      uid,
+      "product:",
+      productId
+    );
+
+    if (!uid) {
+      // Nothing we can do without knowing which user this is about.
+      return res.status(200).json({ received: true, skipped: "no uid" });
+    }
+
+    if (!eventId) {
+      // RevenueCat always sends an id in practice, but guard against a
+      // malformed payload rather than risk double-processing.
+      console.log("REVENUECAT WEBHOOK: missing event id, refusing to process");
+      return res.status(200).json({ received: true, skipped: "no event id" });
+    }
+
+    const userRef = db.collection("users").doc(uid);
+    const eventRef = db.collection("processedWebhookEvents").doc(eventId);
+
+    // Events that mean "the subscriber now has an active paid plan for a
+    // new cycle; set this cycle's credits for the plan". Deliberately does
+    // NOT include PRODUCT_CHANGE - RevenueCat's own docs note that event
+    // does not confirm the new plan has actually taken effect yet (it may
+    // be scheduled for the next renewal). We wait for the RENEWAL event
+    // that follows once the change is actually in effect.
+    const GRANT_EVENTS = ["INITIAL_PURCHASE", "RENEWAL"];
+
+    // Events that mean the subscription is no longer active. We downgrade
+    // the plan but deliberately do NOT zero out remaining credits - the
+    // user keeps whatever they already have until they use it up.
+    const DOWNGRADE_EVENTS = ["EXPIRATION"];
+
+    // Idempotency + the actual user update happen inside ONE transaction.
+    // If we marked the event as processed first and the credit update
+    // failed afterwards, a RevenueCat retry would be skipped as a
+    // "duplicate" and the user would never get credited - so both writes
+    // must succeed or fail together.
+    const result = await db.runTransaction(async (tx) => {
+      const eventSnap = await tx.get(eventRef);
+      if (eventSnap.exists) {
+        return { skipped: "duplicate event" };
+      }
+
+      if (GRANT_EVENTS.includes(type)) {
+        const planInfo = PLAN_BY_PRODUCT_ID[productId];
+        if (!planInfo) {
+          // Still record the event as processed so a retry of this same
+          // (unmappable) event doesn't re-log every time.
+          tx.set(eventRef, {
+            type,
+            uid,
+            productId: productId || null,
+            processedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          return { skipped: "unknown product", productId };
+        }
+
+        tx.set(
+          userRef,
+          {
+            plan: planInfo.plan,
+            credits: planInfo.credits,
+            creditsResetAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+        tx.set(eventRef, {
+          type,
+          uid,
+          productId,
+          processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        return { granted: planInfo };
+      }
+
+      if (DOWNGRADE_EVENTS.includes(type)) {
+        tx.set(userRef, { plan: "expired" }, { merge: true });
+        tx.set(eventRef, {
+          type,
+          uid,
+          productId: productId || null,
+          processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        return { downgraded: true };
+      }
+
+      // CANCELLATION (still active until period end), PRODUCT_CHANGE (not
+      // yet in effect), BILLING_ISSUE, etc. - no user update needed, just
+      // record the event so we have a record and retries are no-ops.
+      tx.set(eventRef, {
+        type,
+        uid,
+        productId: productId || null,
+        processedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      return { noAction: true };
+    });
+
+    if (result.skipped === "duplicate event") {
+      console.log(
+        `REVENUECAT WEBHOOK: event ${eventId} already processed, skipping (retry)`
+      );
+    } else if (result.skipped === "unknown product") {
+      console.log(
+        "REVENUECAT WEBHOOK: unknown product_id, ignoring:",
+        result.productId
+      );
+    } else if (result.granted) {
+      console.log(
+        `REVENUECAT WEBHOOK: granted ${result.granted.credits} credits (${result.granted.plan}) to ${uid}`
+      );
+    } else if (result.downgraded) {
+      console.log(`REVENUECAT WEBHOOK: marked ${uid} as expired`);
+    } else {
+      console.log("REVENUECAT WEBHOOK: no action for event type", type);
+    }
+
+    // Always 200 - RevenueCat retries on non-2xx responses, and we don't
+    // want retries for event types we intentionally ignore.
+    res.status(200).json({ received: true });
+  } catch (error) {
+    console.log("REVENUECAT WEBHOOK ERROR:", error);
+    res.status(500).json({ error: "Webhook processing failed" });
+  }
+});
+
 
 // ============================================================
 // ANALYZE
