@@ -606,6 +606,57 @@ app.get("/me", requireAuth, async (req, res) => {
 });
 
 // ============================================================
+// ADMIN - WEBHOOK EVENT LOG
+// ============================================================
+//
+// Read-only list of the last N RevenueCat webhook events, for the
+// in-app Admin screen. Owner-only - same requireAuth as everything else,
+// with an extra role check on top since this exposes other users' UIDs.
+// ============================================================
+
+app.get("/admin/webhook-events", requireAuth, async (req, res) => {
+  if (req.userDoc.role !== "owner") {
+    return res.status(403).json({ error: "אין הרשאה" });
+  }
+
+  try {
+    const limit = Math.min(
+      parseInt(req.query.limit, 10) || 50,
+      200 // hard cap - this is a debugging view, not a paginated report
+    );
+
+    const snap = await db
+      .collection("processedWebhookEvents")
+      .orderBy("processedAt", "desc")
+      .limit(limit)
+      .get();
+
+    const events = snap.docs.map((doc) => {
+      const data = doc.data();
+      return {
+        eventId: doc.id,
+        type: data.type || null,
+        uid: data.uid || null,
+        productId: data.productId || null,
+        outcome: data.outcome || null,
+        plan: data.plan || null,
+        credits: data.credits ?? null,
+        // Firestore Timestamp -> ISO string, or null if still pending
+        // (serverTimestamp() can briefly read back as null right after write).
+        processedAt: data.processedAt
+          ? data.processedAt.toDate().toISOString()
+          : null,
+      };
+    });
+
+    res.json({ events });
+  } catch (error) {
+    console.log("ADMIN WEBHOOK EVENTS ERROR:", error);
+    res.status(500).json({ error: "שגיאה בטעינת יומן האירועים" });
+  }
+});
+
+// ============================================================
 // REVENUECAT WEBHOOK
 // ============================================================
 //
