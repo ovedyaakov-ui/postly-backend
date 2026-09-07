@@ -696,6 +696,9 @@ app.post("/revenuecat-webhook", async (req, res) => {
             uid,
             productId: productId || null,
             processedAt: admin.firestore.FieldValue.serverTimestamp(),
+            outcome: "unknown_product",
+            plan: null,
+            credits: null,
           });
           return { skipped: "unknown product", productId };
         }
@@ -714,6 +717,9 @@ app.post("/revenuecat-webhook", async (req, res) => {
           uid,
           productId,
           processedAt: admin.firestore.FieldValue.serverTimestamp(),
+          outcome: "granted",
+          plan: planInfo.plan,
+          credits: planInfo.credits,
         });
         return { granted: planInfo };
       }
@@ -725,6 +731,9 @@ app.post("/revenuecat-webhook", async (req, res) => {
           uid,
           productId: productId || null,
           processedAt: admin.firestore.FieldValue.serverTimestamp(),
+          outcome: "downgraded",
+          plan: "expired",
+          credits: null,
         });
         return { downgraded: true };
       }
@@ -737,6 +746,9 @@ app.post("/revenuecat-webhook", async (req, res) => {
         uid,
         productId: productId || null,
         processedAt: admin.firestore.FieldValue.serverTimestamp(),
+        outcome: "no_action",
+        plan: null,
+        credits: null,
       });
       return { noAction: true };
     });
