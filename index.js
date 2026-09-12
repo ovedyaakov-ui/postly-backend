@@ -1,4 +1,4 @@
- import "dotenv/config";
+import "dotenv/config";
 import express from "express";
 import multer from "multer";
 import cors from "cors";
@@ -151,6 +151,17 @@ async function requireAuth(req, res, next) {
     const userSnap = await userRef.get();
  
     if (!userSnap.exists) {
+      // Firestore doc missing - could be a genuinely new user, OR a token
+      // whose account was already deleted via /delete-account. Confirm the
+      // Auth account still exists before auto-creating a fresh document,
+      // so a deleted user's old (still-unexpired) token can't resurrect them.
+      try {
+        await admin.auth().getUser(uid);
+      } catch (err) {
+        console.log("AUTH ERROR: token valid but Auth user no longer exists:", uid);
+        return res.status(401).json({ error: "המשתמש נמחק" });
+      }
+ 
       const newUser = {
         email: decoded.email || null,
         role: "user",
