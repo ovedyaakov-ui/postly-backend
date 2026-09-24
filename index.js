@@ -717,7 +717,13 @@ app.post("/revenuecat-webhook", async (req, res) => {
       return res.status(400).json({ error: "Missing event" });
     }
  
-    const { type, id: eventId, app_user_id: uid, product_id: productId } = event;
+    const {
+      type,
+      id: eventId,
+      app_user_id: uid,
+      product_id: productId,
+      environment,
+    } = event;
     console.log(
       "REVENUECAT WEBHOOK:",
       type,
@@ -739,6 +745,24 @@ app.post("/revenuecat-webhook", async (req, res) => {
       // malformed payload rather than risk double-processing.
       console.log("REVENUECAT WEBHOOK: missing event id, refusing to process");
       return res.status(200).json({ received: true, skipped: "no event id" });
+    }
+ 
+    if (environment === "SANDBOX") {
+      console.log(
+        "REVENUECAT WEBHOOK: sandbox event ignored",
+        type,
+        "event id:",
+        eventId,
+        "uid:",
+        uid,
+        "product:",
+        productId
+      );
+ 
+      return res.status(200).json({
+        received: true,
+        skipped: "sandbox event",
+      });
     }
  
     const userRef = db.collection("users").doc(uid);
