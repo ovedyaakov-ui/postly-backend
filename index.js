@@ -747,22 +747,35 @@ app.post("/revenuecat-webhook", async (req, res) => {
       return res.status(200).json({ received: true, skipped: "no event id" });
     }
  
+    // Sandbox purchases (Apple/Google test transactions) must never grant
+    // production plan/credits to arbitrary users - only the two dedicated
+    // test accounts (kept in sync with RevenueCat's "Allowed App User IDs"
+    // Sandbox access setting) are allowed to receive entitlements from a
+    // SANDBOX event. Everything else is logged and skipped before it can
+    // touch Firestore.
     if (environment === "SANDBOX") {
-      console.log(
-        "REVENUECAT WEBHOOK: sandbox event ignored",
-        type,
-        "event id:",
-        eventId,
-        "uid:",
-        uid,
-        "product:",
-        productId
-      );
+      const SANDBOX_ALLOWED_UIDS = new Set([
+        "NsQhYuhR94ewoUYazal2lOBkrxF2",
+        "ydsuLOBVKVhbev6UUABVzwocCGU2",
+      ]);
  
-      return res.status(200).json({
-        received: true,
-        skipped: "sandbox event",
-      });
+      if (!SANDBOX_ALLOWED_UIDS.has(uid)) {
+        console.log(
+          "REVENUECAT WEBHOOK: sandbox event blocked",
+          type,
+          "event id:",
+          eventId,
+          "uid:",
+          uid,
+          "product:",
+          productId
+        );
+ 
+        return res.status(200).json({
+          received: true,
+          skipped: "sandbox uid not allowed",
+        });
+      }
     }
  
     const userRef = db.collection("users").doc(uid);
