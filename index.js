@@ -84,6 +84,13 @@ const PLAN_BY_PRODUCT_ID = {
 // /revenuecat-webhook are rejected unless they carry this exact value.
 const REVENUECAT_WEBHOOK_SECRET = process.env.REVENUECAT_WEBHOOK_SECRET;
  
+// Shared secret for the SEPARATE RevenueCat Project used for iOS (guest
+// purchase flow, "Transfer to new App User ID"). Configured in that
+// project's own RevenueCat dashboard -> Integrations -> Webhooks. Kept
+// distinct from REVENUECAT_WEBHOOK_SECRET above so the iOS-only endpoint
+// can never be triggered with the Android project's secret, or vice versa.
+const REVENUECAT_IOS_WEBHOOK_SECRET = process.env.REVENUECAT_IOS_WEBHOOK_SECRET;
+ 
 // ============================================================
 // ADMIN EMAIL NOTIFICATIONS
 // ============================================================
@@ -943,6 +950,357 @@ app.post("/revenuecat-webhook", async (req, res) => {
       `Error: ${error.message || String(error)}`,
     ]);
     res.status(500).json({ error: "Webhook processing failed" });
+  }
+});
+ 
+// ============================================================
+// REVENUECAT WEBHOOK - iOS
+// Separate RevenueCat project for iOS guest flow
+// ============================================================
+ 
+app.post("/revenuecat-webhook-ios", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || "";
+ 
+    if (
+      !REVENUECAT_IOS_WEBHOOK_SECRET ||
+      authHeader !== `Bearer ${REVENUECAT_IOS_WEBHOOK_SECRET}`
+    ) {
+      console.log(
+        "REVENUECAT iOS WEBHOOK: rejected, bad/missing auth header"
+      );
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+ 
+    const event = req.body?.event;
+ 
+    if (!event) {
+      return res.status(400).json({ error: "Missing event" });
+    }
+ 
+    const {
+      type,
+      id: eventId,
+      app_user_id: uid,
+      product_id: productId,
+      environment,
+      transferred_from: transferredFrom,
+      transferred_to: transferredTo,
+    } = event;
+ 
+    console.log(
+      "REVENUECAT iOS WEBHOOK:",
+      type,
+      "event id:",
+      eventId,
+      "uid:",
+      uid || "-",
+      "product:",
+      productId || "-"
+    );
+ 
+    if (!eventId) {
+      console.log(
+        "REVENUECAT iOS WEBHOOK: missing event id, refusing to process"
+      );
+ 
+      return res.status(200).json({
+        received: true,
+        skipped: "no event id",
+      });
+    }
+ 
+    const eventRef = db
+      .collection("processedWebhookEvents")
+      .doc(eventId);
+ 
+    // ------------------------------------------------------------
+    // TRANSFER
+    // RevenueCat TRANSFER events do NOT contain app_user_id.
+    // They contain transferred_from[] and transferred_to[] instead.
+    // Move the existing PostlyAI plan + remaining credits from the
+    // old Firebase Anonymous UID to the new Firebase Anonymous UID.
+    // Do NOT grant a fresh monthly credit allowance.
+    // ------------------------------------------------------------
+ 
+    if (type === "TRANSFER") {
+      const oldUid =
+        Array.isArray(transferredFrom) && transferredFrom.length > 0
+          ? transferredFrom[0]
+          : null;
+ 
+      const newUid =
+        Array.isArray(transferredTo) && transferredTo.length > 0
+          ? transferredTo[0]
+          : null;
+ 
+      if (!oldUid || !newUid) {
+        console.log(
+          "REVENUECAT iOS WEBHOOK: transfer missing source/destination UID"
+        );
+ 
+        return res.status(200).json({
+          received: true,
+          skipped: "invalid transfer ids",
+        });
+      }
+ 
+      const oldUserRef = db.collection("users").doc(oldUid);
+      const newUserRef = db.collection("users").doc(newUid);
+ 
+      const result = await db.runTransaction(async (tx) => {
+        const eventSnap = await tx.get(eventRef);
+ 
+        if (eventSnap.exists) {
+          return { skipped: "duplicate event" };
+        }
+ 
+        const oldUserSnap = await tx.get(oldUserRef);
+ 
+        if (!oldUserSnap.exists) {
+          tx.set(eventRef, {
+            type,
+            uid: newUid,
+            transferredFrom: oldUid,
+            transferredTo: newUid,
+            productId: null,
+            environment: environment || null,
+            processedAt:
+              admin.firestore.FieldValue.serverTimestamp(),
+            outcome: "transfer_source_missing",
+            plan: null,
+            credits: null,
+          });
+ 
+          return { skipped: "transfer source missing" };
+        }
+ 
+        const oldUser = oldUserSnap.data();
+ 
+        const remainingCredits = oldUser.credits ?? 0;
+        const existingPlan = oldUser.plan || "expired";
+ 
+        tx.set(
+          newUserRef,
+          {
+            plan: existingPlan,
+            credits: remainingCredits,
+            creditsResetAt:
+              oldUser.creditsResetAt ||
+              admin.firestore.FieldValue.serverTimestamp(),
+            transferredFrom: oldUid,
+            transferredAt:
+              admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+ 
+        tx.set(
+          oldUserRef,
+          {
+            plan: "transferred",
+            credits: 0,
+            transferredTo: newUid,
+            transferredAt:
+              admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+ 
+        tx.set(eventRef, {
+          type,
+          uid: newUid,
+          transferredFrom: oldUid,
+          transferredTo: newUid,
+          productId: null,
+          environment: environment || null,
+          processedAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+          outcome: "transferred",
+          plan: existingPlan,
+          credits: remainingCredits,
+        });
+ 
+        return {
+          transferred: true,
+          from: oldUid,
+          to: newUid,
+          plan: existingPlan,
+          credits: remainingCredits,
+        };
+      });
+ 
+      if (result.skipped === "duplicate event") {
+        console.log(
+          `REVENUECAT iOS WEBHOOK: event ${eventId} already processed`
+        );
+      } else if (result.skipped === "transfer source missing") {
+        console.log(
+          `REVENUECAT iOS WEBHOOK: source user ${oldUid} not found`
+        );
+      } else if (result.transferred) {
+        console.log(
+          `REVENUECAT iOS WEBHOOK: transferred ${result.credits} credits (${result.plan}) from ${result.from} to ${result.to}`
+        );
+      }
+ 
+      return res.status(200).json({ received: true });
+    }
+ 
+    // ------------------------------------------------------------
+    // All normal subscription events require app_user_id
+    // ------------------------------------------------------------
+ 
+    if (!uid) {
+      return res.status(200).json({
+        received: true,
+        skipped: "no uid",
+      });
+    }
+ 
+    const userRef = db.collection("users").doc(uid);
+ 
+    const GRANT_EVENTS = [
+      "INITIAL_PURCHASE",
+      "RENEWAL",
+    ];
+ 
+    const DOWNGRADE_EVENTS = [
+      "EXPIRATION",
+    ];
+ 
+    const result = await db.runTransaction(async (tx) => {
+      const eventSnap = await tx.get(eventRef);
+ 
+      if (eventSnap.exists) {
+        return { skipped: "duplicate event" };
+      }
+ 
+      if (GRANT_EVENTS.includes(type)) {
+        const planInfo = PLAN_BY_PRODUCT_ID[productId];
+ 
+        if (!planInfo) {
+          tx.set(eventRef, {
+            type,
+            uid,
+            productId: productId || null,
+            environment: environment || null,
+            processedAt:
+              admin.firestore.FieldValue.serverTimestamp(),
+            outcome: "unknown_product",
+            plan: null,
+            credits: null,
+          });
+ 
+          return {
+            skipped: "unknown product",
+            productId,
+          };
+        }
+ 
+        tx.set(
+          userRef,
+          {
+            plan: planInfo.plan,
+            credits: planInfo.credits,
+            creditsResetAt:
+              admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+ 
+        tx.set(eventRef, {
+          type,
+          uid,
+          productId,
+          environment: environment || null,
+          processedAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+          outcome: "granted",
+          plan: planInfo.plan,
+          credits: planInfo.credits,
+        });
+ 
+        return {
+          granted: planInfo,
+        };
+      }
+ 
+      if (DOWNGRADE_EVENTS.includes(type)) {
+        tx.set(
+          userRef,
+          { plan: "expired" },
+          { merge: true }
+        );
+ 
+        tx.set(eventRef, {
+          type,
+          uid,
+          productId: productId || null,
+          environment: environment || null,
+          processedAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+          outcome: "downgraded",
+          plan: "expired",
+          credits: null,
+        });
+ 
+        return {
+          downgraded: true,
+        };
+      }
+ 
+      tx.set(eventRef, {
+        type,
+        uid,
+        productId: productId || null,
+        environment: environment || null,
+        processedAt:
+          admin.firestore.FieldValue.serverTimestamp(),
+        outcome: "no_action",
+        plan: null,
+        credits: null,
+      });
+ 
+      return {
+        noAction: true,
+      };
+    });
+ 
+    if (result.skipped === "duplicate event") {
+      console.log(
+        `REVENUECAT iOS WEBHOOK: event ${eventId} already processed`
+      );
+    } else if (result.granted) {
+      console.log(
+        `REVENUECAT iOS WEBHOOK: granted ${result.granted.credits} credits (${result.granted.plan}) to ${uid}`
+      );
+    } else if (result.downgraded) {
+      console.log(
+        `REVENUECAT iOS WEBHOOK: marked ${uid} as expired`
+      );
+    } else if (result.skipped === "unknown product") {
+      console.log(
+        "REVENUECAT iOS WEBHOOK: unknown product:",
+        result.productId
+      );
+    } else {
+      console.log(
+        "REVENUECAT iOS WEBHOOK: no action for event type",
+        type
+      );
+    }
+ 
+    res.status(200).json({ received: true });
+  } catch (error) {
+    console.log(
+      "REVENUECAT iOS WEBHOOK ERROR:",
+      error
+    );
+ 
+    res.status(500).json({
+      error: "Webhook processing failed",
+    });
   }
 });
  
