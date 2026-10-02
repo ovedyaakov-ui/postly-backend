@@ -162,11 +162,19 @@ async function requireAuth(req, res, next) {
     const userSnap = await userRef.get();
  
     if (!userSnap.exists) {
+      // Anonymous Firebase users (iOS guest purchase flow) must NOT get
+      // the free trial credits - they only get access after a real
+      // purchase (granted separately by /revenuecat-webhook-ios). Every
+      // other sign-in provider (email, Google, etc. - i.e. Android today)
+      // keeps getting the existing trial/2 behavior, unchanged.
+      const isAnonymous =
+        decoded.firebase?.sign_in_provider === "anonymous";
+ 
       const newUser = {
         email: decoded.email || null,
         role: "user",
-        credits: FREE_TRIAL_CREDITS,
-        plan: "trial",
+        credits: isAnonymous ? 0 : FREE_TRIAL_CREDITS,
+        plan: isAnonymous ? "none" : "trial",
         creditsResetAt: admin.firestore.FieldValue.serverTimestamp(),
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       };
