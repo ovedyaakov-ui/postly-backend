@@ -194,8 +194,9 @@ async function requireAuth(req, res, next) {
 }
  
 /**
- * Call before an action that costs a credit (currently: /change-background).
- * Owners bypass entirely. Everyone else needs credits > 0.
+ * Call before an action that costs a credit (currently: /analyze and
+ * /change-background). Owners bypass entirely. Everyone else needs
+ * credits > 0.
  * Does NOT deduct - deduction happens only after a successful generation,
  * via deductCreditIfNeeded below.
  */
@@ -1339,6 +1340,17 @@ app.post(
         });
       }
  
+      // Credit check happens before any AI calls - a user with 0 credits
+      // must never reach OpenAI at all (avoids wasted AI cost on a request
+      // that will be blocked anyway, and matches the product rule: 0
+      // credits = no generation of any kind).
+      if (!hasCreditAvailable(req.userDoc)) {
+        return res.status(402).json({
+          error: "נגמרו הקרדיטים שלך - שדרג את המנוי כדי להמשיך",
+          code: "NO_CREDITS",
+        });
+      }
+ 
       const rawBuffer =
         await fs.promises.readFile(req.file.path);
  
@@ -1662,6 +1674,14 @@ ${written.post}
           vision.productName,
         brand:
           vision.brand,
+      });
+ 
+      // Deduct credit only now - after the client has already received
+      // a successful result. Owners are skipped inside the function.
+      // If anything above failed, execution never reaches this line, so
+      // a failed generation never costs the user a credit.
+      deductCreditIfNeeded(req.uid, req.userDoc).catch((err) => {
+        console.log("Credit deduction error (analyze):", err);
       });
  
       try {
