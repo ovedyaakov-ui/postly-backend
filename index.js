@@ -971,16 +971,6 @@ app.post("/revenuecat-webhook-ios", async (req, res) => {
   try {
     const authHeader = req.headers.authorization || "";
  
-    // TEMPORARY DEBUG - remove once the auth mismatch is found.
-    // Logs only lengths, never the actual secret values.
-    console.log("RC iOS AUTH DEBUG", {
-      hasHeader: !!authHeader,
-      authLength: authHeader.length,
-      expectedLength: REVENUECAT_IOS_WEBHOOK_SECRET
-        ? (`Bearer ${REVENUECAT_IOS_WEBHOOK_SECRET}`).length
-        : 0,
-    });
- 
     if (
       !REVENUECAT_IOS_WEBHOOK_SECRET ||
       authHeader !== `Bearer ${REVENUECAT_IOS_WEBHOOK_SECRET}`
