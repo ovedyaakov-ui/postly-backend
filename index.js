@@ -342,7 +342,7 @@ const CATEGORY_SCENE_DEFAULTS = {
   restaurant:
     "an elegant restaurant table setting, either a cozy warm-lit indoor dining space or an outdoor terrace with a scenic view, appetizing fine-dining presentation",
   food_product:
-    "a bright modern grocery store shelf environment, softly blurred neighboring generic products, clean natural white lighting, wide aisle view",
+    "a bright, inviting kitchen counter or warm wooden table by a window, soft natural daylight, clean appetizing styling",
   pet:
     "a cozy home living room with soft natural window light, or alternatively a green outdoor park setting",
   gaming:
@@ -509,6 +509,58 @@ async function translateSceneToEnglish(text) {
   } catch (err) {
     console.log("Scene translation failed, using original text:", err.message);
     return text;
+  }
+}
+
+// Automatic mode only: lets gpt-4o look at the photo and choose the realistic
+// setting where this kind of item would naturally be photographed
+// (e.g. coffee cup on a saucer -> cafe table by a window).
+// If anything fails, falls back to the category-based scene (fallbackScene),
+// so the automatic mode never breaks.
+async function suggestSceneFromImage(imageBuffer, description, fallbackScene) {
+  try {
+    const smallBuffer = await sharp(imageBuffer)
+      .resize(512, 512, { fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 80 })
+      .toBuffer();
+
+    const response = await callOpenAIWithRetry({
+      model: "gpt-4o",
+      max_tokens: 80,
+      temperature: 0.7,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `Look at this photo${
+                description ? ` (the item: ${description})` : ""
+              }. Decide in which realistic setting this item would naturally be photographed for a social media post. Example: a coffee cup on a saucer -> a wooden cafe table next to a window with soft morning light. Reply with ONE short English sentence describing ONLY the surface, surroundings and lighting. Do not mention the item itself. Never choose store shelves, supermarket aisles, retail displays, or plain gray/white studio backdrops.`,
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:image/jpeg;base64,${smallBuffer.toString("base64")}`,
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    const data = await response.json();
+    const scene = data?.choices?.[0]?.message?.content?.trim();
+
+    if (scene && scene.length > 5) {
+      console.log("AUTO SCENE (from image):", scene);
+      return scene;
+    }
+
+    return fallbackScene;
+  } catch (err) {
+    console.log("suggestSceneFromImage failed, using category scene:", err.message);
+    return fallbackScene;
   }
 }
  
@@ -1758,11 +1810,15 @@ app.post(
       const requestedSceneRaw =
         hasUserPrompt
           ? userPrompt.trim()
-          : buildAutomaticScene(
-              category,
-              description
+          : await suggestSceneFromImage(
+              normalizedBuffer,
+              description,
+              buildAutomaticScene(
+                category,
+                description
+              )
             );
- 
+
       const requestedScene =
         await translateSceneToEnglish(
           requestedSceneRaw
