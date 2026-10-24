@@ -422,8 +422,8 @@ function buildScenePrompt(sceneDescription, productOnly = false) {
 - Present the item as a clean, professional product photograph: large, sharp and centered, occupying roughly 45-60% of the frame, resting on or displayed in the described scene in the physically natural way (on a stand, bust, cushion or inside a display).
 - These framing rules override any conflicting size guidance below.`
     : `FRAMING (VERY IMPORTANT):
-- Reframe the shot as if the camera has been pulled back to a wider angle than the original image.
-- The subject should occupy roughly 25-40% of the frame, not fill it.
+- Reframe the shot with the camera slightly pulled back from the original image so the surroundings are clearly visible, but keep the subject large and dominant.
+- The subject should occupy roughly 40-55% of the frame.
 - Show the entire supporting surface (the full table, plate area, or ground) with clear space around the subject.
 - Show a generous, clearly visible background environment behind and around the subject (e.g. a street view, a sea view, a room, as described in the scene) - the background must be a real recognizable part of the image, not blurred out or cropped away.
 - Do not simply repaint the area immediately touching the subject - construct a full wide environmental photograph.`;
@@ -468,7 +468,7 @@ ENVIRONMENT RICHNESS (IMPORTANT):
  
 HERO PRODUCT DOMINANCE (CRITICAL BALANCE):
 - Despite the environment richness above, the subject must remain the unmistakable hero of the image at first glance - context yes, distraction no.
-- The subject should occupy roughly 35-45% of the frame - large enough to dominate visually, not lost in a busy scene.
+- The subject should occupy roughly 40-55% of the frame - large enough to dominate visually, not lost in a busy scene.
 - Create strong visual separation between the subject and the background: if the subject is dark-colored, the area immediately behind and around it should be relatively lighter (and vice versa) so it doesn't blend into the background.
 - Add a subtle rim light or edge light around the subject's silhouette to help it stand out crisply from the background.
 - Keep the immediate area directly behind the subject visually calmer/simpler than the rest of the scene - richness and detail should be more present at the edges and periphery of the frame, not directly behind the subject where it would compete with it.
@@ -536,16 +536,6 @@ async function analyzePhotoForBackground(imageBuffer, description) {
       .jpeg({ quality: 80 })
       .toBuffer();
 
-    // Random style direction chosen on the server, for variety between runs.
-    // The model follows it only when it makes sense for the item.
-    const STYLE_DIRECTIONS = [
-      "a cozy, warm indoor setting",
-      "a pleasant outdoor setting such as a garden, terrace or balcony",
-      "a table or surface right next to a bright window with soft natural light",
-    ];
-    const styleDirection =
-      STYLE_DIRECTIONS[Math.floor(Math.random() * STYLE_DIRECTIONS.length)];
-
     const response = await callOpenAIWithRetry({
       model: "gpt-4o",
       max_tokens: 150,
@@ -561,7 +551,7 @@ async function analyzePhotoForBackground(imageBuffer, description) {
                 description ? ` (the item: ${description})` : ""
               }. Return JSON only with two fields:
 "worn_accessory": true if the item being shown is jewelry or a small accessory (necklace, ring, bracelet, earrings, watch, glasses) that is worn on a person's body in the photo; otherwise false.
-"scene": ONE short English sentence describing the surface, surroundings and lighting of a realistic, attractive setting for a PRODUCT photograph of the item itself. Rules: the ITEM is the hero and the scene is built for the item, never for any person who appears in the photo (ignore people). Choose a surface the item physically rests on in real life: jewelry on a velvet cushion, a display bust or stand, or an open jewelry box in an upscale jewelry boutique with spotlights; shoes on a clean wooden floor, a stone step or a low display ledge (never on a desk or a dining table); clothing on a hanger or boutique rack; food and drinks on a table; and so on. Preferred style direction: ${styleDirection} - follow it only if it makes sense for this item, and never for jewelry (jewelry always gets the boutique display setting). Do not mention the item itself in the sentence. Never choose supermarket shelves, price tags, or plain gray/white studio backdrops.`,
+"scene": ONE or TWO short English sentences describing the surface, surroundings and lighting of the single most fitting setting for a PRODUCT photograph of the item itself. Rules: the ITEM is the hero and the scene is built for the item, never for any person who appears in the photo (ignore people). First understand what the item is, what it is used for and who buys it. Then choose the specific world this item belongs to in its customer's life, or the premium place where a leading brand would present it to sell it, so that a customer immediately understands it is the product being sold and wants to buy it. Be specific to the item's purpose and customer. Avoid generic settings such as a plain room, a plain floor, a plain table or a generic living room, unless that is truly where this item belongs. Match the style and price level of the item (a luxury item gets an upscale, high-end setting; a casual item gets a casual one), and place it on a surface it can physically rest on in real life, never on furniture it would not normally be placed on. Do not mention the item itself in the sentence. Never choose supermarket shelves, price tags, or plain gray/white studio backdrops.`,
             },
             {
               type: "image_url",
