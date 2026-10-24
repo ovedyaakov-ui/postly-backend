@@ -413,7 +413,21 @@ function buildAutomaticScene(category, description) {
   }`;
 }
  
-function buildScenePrompt(sceneDescription) {
+function buildScenePrompt(sceneDescription, productOnly = false) {
+  const framingBlock = productOnly
+    ? `FRAMING (VERY IMPORTANT - PRODUCT-ONLY MODE):
+- The original photo shows the item worn on a person's body. The person is NOT the subject.
+- Do NOT include the person: no face, head, hair, neck, skin, shoulders, body or hands anywhere in the final image. Show the item by itself.
+- Keep the item exactly as in the original photo: same shape, material, color, stones, links and every detail.
+- Present the item as a clean, professional product photograph: large, sharp and centered, occupying roughly 45-60% of the frame, resting on or displayed in the described scene in the physically natural way (on a stand, bust, cushion or inside a display).
+- These framing rules override any conflicting size guidance below.`
+    : `FRAMING (VERY IMPORTANT):
+- Reframe the shot as if the camera has been pulled back to a wider angle than the original image.
+- The subject should occupy roughly 25-40% of the frame, not fill it.
+- Show the entire supporting surface (the full table, plate area, or ground) with clear space around the subject.
+- Show a generous, clearly visible background environment behind and around the subject (e.g. a street view, a sea view, a room, as described in the scene) - the background must be a real recognizable part of the image, not blurred out or cropped away.
+- Do not simply repaint the area immediately touching the subject - construct a full wide environmental photograph.`;
+
   return `
 Create a photorealistic premium photograph using the exact real subject from the provided image (this may be a product, food, a pet, or any other subject).
  
@@ -425,12 +439,7 @@ IMPORTANT SUBJECT PRESERVATION:
 SCENE:
 Place the real subject naturally in the following scene: ${sceneDescription}
  
-FRAMING (VERY IMPORTANT):
-- Reframe the shot as if the camera has been pulled back to a wider angle than the original image.
-- The subject should occupy roughly 25-40% of the frame, not fill it.
-- Show the entire supporting surface (the full table, plate area, or ground) with clear space around the subject.
-- Show a generous, clearly visible background environment behind and around the subject (e.g. a street view, a sea view, a room, as described in the scene) - the background must be a real recognizable part of the image, not blurred out or cropped away.
-- Do not simply repaint the area immediately touching the subject - construct a full wide environmental photograph.
+${framingBlock}
  
 PHYSICAL INTEGRATION:
 - Match the subject's lighting to the new scene's lighting.
@@ -512,22 +521,36 @@ async function translateSceneToEnglish(text) {
   }
 }
 
-// Automatic mode only: lets gpt-4o look at the photo and choose the realistic
-// setting where this kind of item would naturally be photographed
-// (e.g. coffee cup on a saucer -> cafe table by a window).
-// If anything fails, falls back to the category-based scene (fallbackScene),
-// so the automatic mode never breaks.
-async function suggestSceneFromImage(imageBuffer, description, fallbackScene) {
+// Automatic mode only. gpt-4o looks at the photo and returns:
+//  - scene: a realistic, attractive setting for a PRODUCT photograph of the item
+//    itself (never a scene built around a person who happens to be in the photo)
+//  - wornAccessory: true when the item is jewelry / a small accessory worn on a
+//    person's body (necklace on a neck, ring on a hand, watch on a wrist...).
+//    In that case the person is removed and the item is shown by itself.
+// If anything fails, returns { scene: null, wornAccessory: false } so the
+// caller falls back to the category-based scene and the normal framing.
+async function analyzePhotoForBackground(imageBuffer, description) {
   try {
     const smallBuffer = await sharp(imageBuffer)
       .resize(512, 512, { fit: "inside", withoutEnlargement: true })
       .jpeg({ quality: 80 })
       .toBuffer();
 
+    // Random style direction chosen on the server, for variety between runs.
+    // The model follows it only when it makes sense for the item.
+    const STYLE_DIRECTIONS = [
+      "a cozy, warm indoor setting",
+      "a pleasant outdoor setting such as a garden, terrace or balcony",
+      "a table or surface right next to a bright window with soft natural light",
+    ];
+    const styleDirection =
+      STYLE_DIRECTIONS[Math.floor(Math.random() * STYLE_DIRECTIONS.length)];
+
     const response = await callOpenAIWithRetry({
       model: "gpt-4o",
-      max_tokens: 80,
-      temperature: 0.7,
+      max_tokens: 150,
+      temperature: 0.8,
+      response_format: { type: "json_object" },
       messages: [
         {
           role: "user",
@@ -536,7 +559,9 @@ async function suggestSceneFromImage(imageBuffer, description, fallbackScene) {
               type: "text",
               text: `Look at this photo${
                 description ? ` (the item: ${description})` : ""
-              }. Decide in which realistic setting this item would naturally be photographed for a social media post. Example: a coffee cup on a saucer -> a wooden cafe table next to a window with soft morning light. Reply with ONE short English sentence describing ONLY the surface, surroundings and lighting. Do not mention the item itself. Never choose store shelves, supermarket aisles, retail displays, or plain gray/white studio backdrops.`,
+              }. Return JSON only with two fields:
+"worn_accessory": true if the item being shown is jewelry or a small accessory (necklace, ring, bracelet, earrings, watch, glasses) that is worn on a person's body in the photo; otherwise false.
+"scene": ONE short English sentence describing the surface, surroundings and lighting of a realistic, attractive setting for a PRODUCT photograph of the item itself. Rules: the ITEM is the hero and the scene is built for the item, never for any person who appears in the photo (ignore people). Choose a surface the item physically rests on in real life: jewelry on a velvet cushion, a display bust or stand, or an open jewelry box in an upscale jewelry boutique with spotlights; shoes on a clean wooden floor, a stone step or a low display ledge (never on a desk or a dining table); clothing on a hanger or boutique rack; food and drinks on a table; and so on. Preferred style direction: ${styleDirection} - follow it only if it makes sense for this item, and never for jewelry (jewelry always gets the boutique display setting). Do not mention the item itself in the sentence. Never choose supermarket shelves, price tags, or plain gray/white studio backdrops.`,
             },
             {
               type: "image_url",
@@ -550,26 +575,28 @@ async function suggestSceneFromImage(imageBuffer, description, fallbackScene) {
     });
 
     const data = await response.json();
-    const scene = data?.choices?.[0]?.message?.content?.trim();
+    const parsed = JSON.parse(data?.choices?.[0]?.message?.content);
 
-    if (scene && scene.length > 5) {
-      console.log("AUTO SCENE (from image):", scene);
-      return scene;
-    }
+    const scene =
+      typeof parsed.scene === "string" && parsed.scene.trim().length > 5
+        ? parsed.scene.trim()
+        : null;
+    const wornAccessory = parsed.worn_accessory === true;
 
-    return fallbackScene;
+    console.log("PHOTO ANALYSIS:", { scene, wornAccessory });
+    return { scene, wornAccessory };
   } catch (err) {
-    console.log("suggestSceneFromImage failed, using category scene:", err.message);
-    return fallbackScene;
+    console.log("analyzePhotoForBackground failed, using defaults:", err.message);
+    return { scene: null, wornAccessory: false };
   }
 }
- 
+
 async function generateSceneWithGemini(
   imageBuffer,
   sceneDescription,
-  { maxRetries = 3, retryDelayMs = 1500 } = {}
+  { maxRetries = 3, retryDelayMs = 1500, productOnly = false } = {}
 ) {
-  const prompt = buildScenePrompt(sceneDescription);
+  const prompt = buildScenePrompt(sceneDescription, productOnly);
   const base64Image = imageBuffer.toString("base64");
  
   let lastError = null;
@@ -1807,18 +1834,24 @@ app.post(
           })
           .toBuffer();
  
+      // Automatic mode only: analyze the photo. A custom description from the
+      // user is used exactly as before, with no extra analysis.
+      const analysis = hasUserPrompt
+        ? { scene: null, wornAccessory: false }
+        : await analyzePhotoForBackground(
+            normalizedBuffer,
+            description
+          );
+ 
       const requestedSceneRaw =
         hasUserPrompt
           ? userPrompt.trim()
-          : await suggestSceneFromImage(
-              normalizedBuffer,
-              description,
-              buildAutomaticScene(
-                category,
-                description
-              )
+          : analysis.scene ||
+            buildAutomaticScene(
+              category,
+              description
             );
-
+ 
       const requestedScene =
         await translateSceneToEnglish(
           requestedSceneRaw
@@ -1827,7 +1860,8 @@ app.post(
       const { imageData, refusalText } =
         await generateSceneWithGemini(
           normalizedBuffer,
-          requestedScene
+          requestedScene,
+          { productOnly: analysis.wornAccessory }
         );
  
       if (!imageData) {
