@@ -672,6 +672,402 @@ async function generateSceneWithGemini(
 }
  
 // ============================================================
+// EXACT PRODUCT STAGING (V4)
+// The product pixels always come from the ORIGINAL photo.
+// ============================================================
+//
+// Why: an image model that repaints the whole picture (V3 / Gemini) also
+// repaints the product, so shape, color and details can change. Here the
+// model only paints the SURROUNDINGS, and afterwards the original product
+// pixels are pasted back on top, so the product itself never changes.
+//
+// Steps:
+//   1. remove.bg finds the product outline (alpha mask only - the color
+//      pixels always come from the original photo, at full resolution).
+//   2. The product is placed on a 1024x1024 canvas and a mask protects it.
+//   3. gpt-image-1 paints the scene around it (images/edits with the mask).
+//   4. The original product is pasted back (soft 1px edge) with a light
+//      contact shadow underneath.
+//
+// Switch (Render environment variable STAGING_MODE):
+//   gemini (default) = V3, as before
+//   exact            = this pipeline
+// Items worn on a person (necklace on a neck, etc.) always use V3, because
+// removing the person needs a generative model.
+// ============================================================
+
+const STAGING_MODE = (process.env.STAGING_MODE || "gemini").trim().toLowerCase();
+const IMAGE_EDIT_QUALITY = (process.env.IMAGE_EDIT_QUALITY || "medium").trim().toLowerCase();
+
+const EXACT_CANVAS = 1024;
+// The product is fitted inside this box on the canvas (fractions of the canvas).
+const EXACT_MAX_W = 0.6;
+const EXACT_MAX_H = 0.62;
+// Where the bottom of the product sits (fraction of canvas height).
+const EXACT_BASE_Y = 0.8;
+
+async function removeBackgroundMask(imageBuffer, { maxRetries = 2, retryDelayMs = 1000 } = {}) {
+  if (!REMOVE_BG_API_KEY) {
+    throw new Error("REMOVE_BG_API_KEY is missing");
+  }
+
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    let retryable = false;
+
+    try {
+      const form = new FormData();
+      form.append("image_file", imageBuffer, {
+        filename: "product.jpg",
+        contentType: "image/jpeg",
+      });
+      form.append("size", "auto");
+      form.append("format", "png");
+
+      const response = await fetch("https://api.remove.bg/v1.0/removebg", {
+        method: "POST",
+        headers: {
+          "X-Api-Key": REMOVE_BG_API_KEY,
+          ...form.getHeaders(),
+        },
+        body: form,
+      });
+
+      if (response.ok) {
+        return Buffer.from(await response.arrayBuffer());
+      }
+
+      const bodyText = await response.text();
+      lastError = new Error(`remove.bg ${response.status}: ${bodyText.slice(0, 200)}`);
+      retryable = response.status === 429 || response.status >= 500;
+    } catch (err) {
+      lastError = err;
+      retryable = true;
+    }
+
+    console.log(`remove.bg attempt ${attempt}/${maxRetries} failed:`, lastError.message);
+
+    if (!retryable || attempt === maxRetries) {
+      break;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
+  }
+
+  throw lastError || new Error("remove.bg failed");
+}
+
+// Returns { left, top, width, height, coverage } of the product in the mask,
+// or null if there is nothing there.
+function alphaBoundingBox(mask, width, height, threshold = 24) {
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  let count = 0;
+
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      if (mask[row + x] > threshold) {
+        count++;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  if (maxX < 0) {
+    return null;
+  }
+
+  return {
+    left: minX,
+    top: minY,
+    width: maxX - minX + 1,
+    height: maxY - minY + 1,
+    coverage: count / (width * height),
+  };
+}
+
+function buildExactScenePrompt(sceneDescription) {
+  return `
+Edit this image. Keep the product in the center EXACTLY as it is, and replace everything around it with a new photorealistic scene.
+
+SCENE:
+${sceneDescription}
+
+RULES:
+- Do not modify the product in any way: same shape, proportions, color, material, label, text and logo. Only paint the surroundings.
+- The product must look physically placed in the scene: it rests naturally on a surface, with a realistic contact shadow and a soft reflection on that surface. Match the light direction and color temperature of the scene to the product's own lighting.
+- The base of the product sits at about 80% of the image height. The surface it rests on must continue naturally across the bottom of the image, and the background environment must be clearly visible behind and around the product.
+- Fill the entire image with the scene. No flat gray areas, no empty areas.
+- Keep the area directly behind the product calm and uncluttered, so the product stays the hero of the image.
+- Photorealistic premium photograph, sharp detail, no heavy blur, no CGI look.
+- Do NOT generate any brand names, store names, logos, price tags or readable text anywhere in the background. No watermark.
+`.trim();
+}
+
+async function editBackgroundWithOpenAI(
+  anchorPng,
+  maskPng,
+  prompt,
+  { maxRetries = 3, retryDelayMs = 1500 } = {}
+) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    let retryable = false;
+
+    try {
+      const form = new FormData();
+      form.append("model", "gpt-image-1");
+      form.append("image", anchorPng, {
+        filename: "image.png",
+        contentType: "image/png",
+      });
+      form.append("mask", maskPng, {
+        filename: "mask.png",
+        contentType: "image/png",
+      });
+      form.append("prompt", prompt);
+      form.append("size", "1024x1024");
+      form.append("quality", IMAGE_EDIT_QUALITY);
+      form.append("n", "1");
+
+      const response = await fetch("https://api.openai.com/v1/images/edits", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          ...form.getHeaders(),
+        },
+        body: form,
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const b64 = data?.data?.[0]?.b64_json;
+
+        if (b64) {
+          return Buffer.from(b64, "base64");
+        }
+
+        lastError = new Error("OpenAI image edit returned no image");
+      } else {
+        const bodyText = await response.text();
+        lastError = new Error(`OpenAI image edit ${response.status}: ${bodyText.slice(0, 300)}`);
+        retryable = response.status === 429 || response.status >= 500;
+      }
+    } catch (err) {
+      lastError = err;
+      retryable = true;
+    }
+
+    console.log(`OpenAI image edit attempt ${attempt}/${maxRetries} failed:`, lastError.message);
+
+    if (!retryable || attempt === maxRetries) {
+      break;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs * attempt));
+  }
+
+  throw lastError || new Error("OpenAI image edit failed");
+}
+
+/**
+ * Returns a 1024x1024 PNG buffer: the scene painted around the ORIGINAL
+ * product, whose pixels are pasted back unchanged (only scaled).
+ * Throws when the product cannot be separated from the photo - the caller
+ * must NOT deliver a changed product in that case.
+ *
+ * deps can be overridden for testing.
+ */
+async function generateExactProductScene(
+  originalBuffer,
+  sceneDescription,
+  { removeBg = removeBackgroundMask, editBg = editBackgroundWithOpenAI } = {}
+) {
+  const meta = await sharp(originalBuffer).metadata();
+  const srcW = meta.width;
+  const srcH = meta.height;
+
+  // 1. Product outline (alpha only), resized to the original photo's size.
+  const cutoutPng = await removeBg(originalBuffer);
+
+  const mask = await sharp(cutoutPng)
+    .ensureAlpha()
+    .extractChannel("alpha")
+    .resize(srcW, srcH, { fit: "fill" })
+    .raw()
+    .toBuffer();
+
+  const box = alphaBoundingBox(mask, srcW, srcH);
+
+  if (!box || box.coverage < 0.01 || box.coverage > 0.97) {
+    throw new Error(
+      `product could not be separated (coverage ${box ? box.coverage.toFixed(3) : "none"})`
+    );
+  }
+
+  // 2. Crop the product (original color pixels + its mask) at full resolution.
+  const rgbCrop = await sharp(originalBuffer)
+    .removeAlpha()
+    .extract({ left: box.left, top: box.top, width: box.width, height: box.height })
+    .raw()
+    .toBuffer();
+
+  const alphaCrop = Buffer.alloc(box.width * box.height);
+  for (let y = 0; y < box.height; y++) {
+    mask.copy(
+      alphaCrop,
+      y * box.width,
+      (box.top + y) * srcW + box.left,
+      (box.top + y) * srcW + box.left + box.width
+    );
+  }
+
+  // 3. Fit the product inside the layout box on the 1024 canvas.
+  const scale = Math.min(
+    (EXACT_CANVAS * EXACT_MAX_W) / box.width,
+    (EXACT_CANVAS * EXACT_MAX_H) / box.height
+  );
+  const targetW = Math.max(1, Math.round(box.width * scale));
+  const targetH = Math.max(1, Math.round(box.height * scale));
+  const placeLeft = Math.round((EXACT_CANVAS - targetW) / 2);
+  const placeTop = Math.max(
+    0,
+    Math.min(EXACT_CANVAS - targetH, Math.round(EXACT_CANVAS * EXACT_BASE_Y - targetH))
+  );
+
+  const productRgb = await sharp(rgbCrop, {
+    raw: { width: box.width, height: box.height, channels: 3 },
+  })
+    .resize(targetW, targetH, { fit: "fill" })
+    .raw()
+    .toBuffer();
+
+  const productAlpha = await sharp(alphaCrop, {
+    raw: { width: box.width, height: box.height, channels: 1 },
+  })
+    .resize(targetW, targetH, { fit: "fill" })
+    .toColourspace("b-w")
+    .raw()
+    .toBuffer();
+
+  const productRgba = await sharp(productRgb, {
+    raw: { width: targetW, height: targetH, channels: 3 },
+  })
+    .joinChannel(productAlpha, {
+      raw: { width: targetW, height: targetH, channels: 1 },
+    })
+    .png()
+    .toBuffer();
+
+  // 4. Canvas for the model: product on neutral gray, with a mask that
+  //    protects the product (alpha 255 = keep, alpha 0 = paint here).
+  const anchorPng = await sharp({
+    create: {
+      width: EXACT_CANVAS,
+      height: EXACT_CANVAS,
+      channels: 3,
+      background: { r: 128, g: 128, b: 128 },
+    },
+  })
+    .composite([{ input: productRgba, left: placeLeft, top: placeTop }])
+    .png()
+    .toBuffer();
+
+  const keepOnBlack = await sharp({
+    create: {
+      width: EXACT_CANVAS,
+      height: EXACT_CANVAS,
+      channels: 3,
+      background: { r: 0, g: 0, b: 0 },
+    },
+  })
+    .composite([
+      {
+        input: await sharp(productAlpha, {
+          raw: { width: targetW, height: targetH, channels: 1 },
+        })
+          .png()
+          .toBuffer(),
+        left: placeLeft,
+        top: placeTop,
+      },
+    ])
+    .png()
+    .toBuffer();
+
+  // Slightly shrink the protected area so the model repaints the very edge.
+  const keepRaw = await sharp(keepOnBlack)
+    .greyscale()
+    .blur(1.5)
+    .threshold(240)
+    .raw()
+    .toBuffer();
+
+  const maskPng = await sharp(Buffer.alloc(EXACT_CANVAS * EXACT_CANVAS * 3), {
+    raw: { width: EXACT_CANVAS, height: EXACT_CANVAS, channels: 3 },
+  })
+    .joinChannel(keepRaw, {
+      raw: { width: EXACT_CANVAS, height: EXACT_CANVAS, channels: 1 },
+    })
+    .png()
+    .toBuffer();
+
+  // 5. The model paints the scene around the product.
+  const sceneBuffer = await editBg(
+    anchorPng,
+    maskPng,
+    buildExactScenePrompt(sceneDescription)
+  );
+
+  // 6. Paste the ORIGINAL product back (soft 0.6px edge) + light contact shadow.
+  const softAlpha = await sharp(productAlpha, {
+    raw: { width: targetW, height: targetH, channels: 1 },
+  })
+    .blur(0.6)
+    .toColourspace("b-w")
+    .raw()
+    .toBuffer();
+
+  const productSoft = await sharp(productRgb, {
+    raw: { width: targetW, height: targetH, channels: 3 },
+  })
+    .joinChannel(softAlpha, {
+      raw: { width: targetW, height: targetH, channels: 1 },
+    })
+    .png()
+    .toBuffer();
+
+  const shadowBlur = Math.max(6, Math.round(targetW * 0.03));
+  const shadowSvg = Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${EXACT_CANVAS}" height="${EXACT_CANVAS}">` +
+      `<defs><filter id="b" x="-50%" y="-200%" width="200%" height="500%"><feGaussianBlur stdDeviation="${shadowBlur}"/></filter></defs>` +
+      `<ellipse cx="${placeLeft + targetW / 2}" cy="${placeTop + targetH - 3}" rx="${Math.round(
+        targetW * 0.42
+      )}" ry="${Math.max(6, Math.round(targetH * 0.035))}" fill="black" opacity="0.18" filter="url(#b)"/>` +
+      `</svg>`
+  );
+
+  return sharp(sceneBuffer)
+    .resize(EXACT_CANVAS, EXACT_CANVAS, { fit: "cover" })
+    .removeAlpha()
+    .composite([
+      { input: shadowSvg, left: 0, top: 0 },
+      { input: productSoft, left: placeLeft, top: placeTop },
+    ])
+    .png()
+    .toBuffer();
+}
+
+
+// ============================================================
 // USER INFO (for the "My Subscription" screen in the app)
 // ============================================================
 //
@@ -1827,7 +2223,7 @@ app.post(
  
       // Automatic mode only: analyze the photo. A custom description from the
       // user is used exactly as before, with no extra analysis.
-      const analysis = hasUserPrompt
+      const analysis = (hasUserPrompt && STAGING_MODE !== "exact")
         ? { scene: null, wornAccessory: false }
         : await analyzePhotoForBackground(
             normalizedBuffer,
@@ -1848,14 +2244,40 @@ app.post(
           requestedSceneRaw
         );
  
-      const { imageData, refusalText } =
-        await generateSceneWithGemini(
+      // V4: keep the product pixels exactly as photographed. Worn accessories
+      // (necklace on a neck, etc.) stay on the Gemini path.
+      const useExact =
+        STAGING_MODE === "exact" && !analysis.wornAccessory;
+ 
+      let exactBuffer = null;
+      let imageData = null;
+      let refusalText = null;
+ 
+      if (useExact) {
+        try {
+          exactBuffer = await generateExactProductScene(
+            normalizedBuffer,
+            requestedScene
+          );
+        } catch (exactErr) {
+          console.log("PRODUCT STAGING V4 ERROR:", exactErr);
+          // Never deliver a changed product, and never charge for a failure.
+          return res.status(422).json({
+            error:
+              "לא ניתן היה להפריד את המוצר מהרקע בתמונה הזו. נסה תמונה עם רקע פשוט וניגודיות טובה יותר",
+          });
+        }
+      } else {
+        const geminiResult = await generateSceneWithGemini(
           normalizedBuffer,
           requestedScene,
           { productOnly: analysis.wornAccessory }
         );
+        imageData = geminiResult.imageData;
+        refusalText = geminiResult.refusalText;
+      }
  
-      if (!imageData) {
+      if (!useExact && !imageData) {
         console.log(
           "PRODUCT STAGING V3 - Gemini did not return an image:",
           refusalText
@@ -1870,25 +2292,24 @@ app.post(
           });
       }
  
-      const editedBuffer =
-        Buffer.from(imageData, "base64");
- 
-      // Final normalization only - no compositing needed with the V3 pipeline.
-      const finalBuffer =
-        await sharp(editedBuffer)
-          .resize(1024, 1024, {
-            fit: "cover",
-          })
-          .png()
-          .toBuffer();
+      // Final normalization only.
+      const finalBuffer = useExact
+        ? exactBuffer
+        : await sharp(Buffer.from(imageData, "base64"))
+            .resize(1024, 1024, {
+              fit: "cover",
+            })
+            .png()
+            .toBuffer();
  
       res.json({
         image: `data:image/png;base64,${finalBuffer.toString(
           "base64"
         )}`,
  
-        stagingVersion:
-          "v3-gemini-3.1-flash-image",
+        stagingVersion: useExact
+          ? "v4-exact-product"
+          : "v3-gemini-3.1-flash-image",
       });
  
       // Deduct credit only now - after the client has already received
