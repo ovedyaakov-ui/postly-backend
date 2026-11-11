@@ -696,7 +696,7 @@ async function generateSceneWithGemini(
 // removing the person needs a generative model.
 // ============================================================
 
-const STAGING_MODE = (process.env.STAGING_MODE || "gemini").trim().toLowerCase();
+const STAGING_MODE = (process.env.STAGING_MODE || "exact").trim().toLowerCase();
 const IMAGE_EDIT_QUALITY = (process.env.IMAGE_EDIT_QUALITY || "medium").trim().toLowerCase();
 
 const EXACT_CANVAS = 1024;
