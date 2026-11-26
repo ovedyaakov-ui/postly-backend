@@ -10,6 +10,8 @@ import strategies from "./strategies.js";
 import { GoogleGenAI } from "@google/genai";
 import admin from "firebase-admin";
 import nodemailer from "nodemailer";
+import { generateBackgroundSuggestions } from "./backgroundSuggestions.js";
+import { registerVideoRoutes } from "./videoClips.js";
  
 const app = express();
  
@@ -696,7 +698,7 @@ async function generateSceneWithGemini(
 // removing the person needs a generative model.
 // ============================================================
 
-const STAGING_MODE = (process.env.STAGING_MODE || "exact").trim().toLowerCase();
+const STAGING_MODE = (process.env.STAGING_MODE || "gemini").trim().toLowerCase();
 const IMAGE_EDIT_QUALITY = (process.env.IMAGE_EDIT_QUALITY || "medium").trim().toLowerCase();
 
 const EXACT_CANVAS = 1024;
@@ -2350,6 +2352,132 @@ app.post(
 );
  
 // ============================================================
+// BACKGROUND SUGGESTIONS - "הצעות לרקע" button
+// ============================================================
+//
+// Returns 4 short Hebrew background ideas for the uploaded photo. Free:
+// no credit is deducted here - the credit is deducted later, only when the
+// user picks a suggestion and /change-background succeeds. Still requires
+// an available credit, so users who cannot use a suggestion anyway do not
+// trigger AI calls.
+//
+// Rate limit: every request counts (even a failed one), up to
+// MAX_SUGGESTIONS_PER_DAY per user per day (Israel date). Owners are not
+// limited, like everywhere else. Stored in Firestore so it survives a
+// deploy/restart. Over the limit: HTTP 429, no AI call, no credit change.
+// ============================================================
+
+const MAX_SUGGESTIONS_PER_DAY = 20;
+
+function israelDayKey(now = new Date()) {
+  return now.toLocaleDateString("en-CA", { timeZone: "Asia/Jerusalem" });
+}
+
+async function allowSuggestionsAndCount(uid, userDoc) {
+  if (userDoc.role === "owner") return true;
+
+  const counterRef = db
+    .collection("users")
+    .doc(uid)
+    .collection("rateLimits")
+    .doc("backgroundSuggestions");
+
+  const today = israelDayKey();
+
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(counterRef);
+    const data = snap.exists ? snap.data() : {};
+    const current = data.day === today ? data.count || 0 : 0;
+
+    if (current >= MAX_SUGGESTIONS_PER_DAY) {
+      return false;
+    }
+
+    tx.set(counterRef, { day: today, count: current + 1 });
+    return true;
+  });
+}
+
+app.post(
+  "/background-suggestions",
+  requireAuth,
+  upload.single("image"),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          error: "Missing image",
+        });
+      }
+
+      if (!hasCreditAvailable(req.userDoc)) {
+        return res.status(402).json({
+          error: "נגמרו הקרדיטים שלך - שדרג את המנוי כדי להמשיך",
+          code: "NO_CREDITS",
+        });
+      }
+
+      const canSuggest = await allowSuggestionsAndCount(req.uid, req.userDoc);
+
+      if (!canSuggest) {
+        return res.status(429).json({
+          error: "הגעת למגבלת ההצעות להיום. אפשר להמשיך מחר, או לכתוב רקע בעצמך",
+          code: "SUGGESTIONS_LIMIT_REACHED",
+        });
+      }
+
+      const { description, category } = req.body;
+
+      const rawBuffer = await fs.promises.readFile(req.file.path);
+
+      const suggestions = await generateBackgroundSuggestions(rawBuffer, {
+        description,
+        category,
+      });
+
+      res.json({ suggestions });
+    } catch (error) {
+      console.log("BACKGROUND SUGGESTIONS ERROR:", error);
+
+      res.status(500).json({
+        error: "לא הצלחנו להכין הצעות כרגע, נסה שוב",
+      });
+    } finally {
+      try {
+        if (req.file && fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+        }
+      } catch (err) {
+        console.log("File cleanup error:", err);
+      }
+    }
+  }
+);
+
+// ============================================================
+// VIDEO CLIPS - see videoClips.js
+// ============================================================
+
+const VIDEO_STORAGE_BUCKET = (
+  process.env.VIDEO_STORAGE_BUCKET || "postly-ai-a2e4f.firebasestorage.app"
+).trim();
+
+const videoClips = registerVideoRoutes({
+  app,
+  db,
+  getBucket: () => admin.storage().bucket(VIDEO_STORAGE_BUCKET),
+  requireAuth,
+  upload,
+  fetchImpl: fetch,
+  FormDataImpl: FormData,
+  notifyAdmin: sendAdminNotification,
+  readFile: (p) => fs.promises.readFile(p),
+  removeFile: async (p) => {
+    if (fs.existsSync(p)) await fs.promises.unlink(p);
+  },
+});
+
+// ============================================================
 // IMPROVE
 // ============================================================
  
@@ -2620,6 +2748,8 @@ app.listen(
     console.log(
       "🖼️ Product Staging V3: Gemini 3.1 Flash Image"
     );
+
+    videoClips.resumeJobs();
   }
 );
  
