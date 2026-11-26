@@ -55,6 +55,13 @@
 //     engine id, credits and the reason. The flag is set in a transaction
 //     only if it was not set before, so there is exactly one email per video,
 //     even with many watcher rounds or several server processes.
+//   - (v6, 26.11) When the engine says the fal balance/quota is used up
+//     (error_code "provider_quota", engine 6z4), the job is refunded as usual
+//     and THEN the owner gets an email - at most one per hour (counted in this
+//     server's memory: a restart can send one more). The email can never
+//     block or undo the refund. The user still sees the same neutral message.
+//   - (v6) POST /video-clips/test-admin-email (owner only): sends one test
+//     email through the same notifyAdmin, to check that emails leave Render.
 //   - (v4) "ready", "failed + refund" and "engine id found" are written in
 //     transactions that first check the job is still "processing", so two
 //     server processes can never both refund and deliver the same video.
@@ -72,6 +79,7 @@ export const SWEEP_MS = 5 * 60 * 1000;
 export const START_GRACE_MS = 2 * 60 * 1000;          // wait before asking about an unclear start
 export const PROCESSING_ALERT_MS = 60 * 60 * 1000;     // engine says "processing" this long -> manualCheck (no refund)
 export const NO_ANSWER_REFUND_MS = 24 * 60 * 60 * 1000; // no answer at all from the engine
+export const QUOTA_EMAIL_EVERY_MS = 60 * 60 * 1000;    // v6: at most one "fal balance used up" email per hour
 
 const JOBS = "videoJobs";
 
@@ -99,6 +107,7 @@ export function registerVideoRoutes({
   notifyAdmin = () => {},
   timeouts = ENGINE_TIMEOUT_MS,
   sweepMs = SWEEP_MS,
+  quotaEmailEveryMs = QUOTA_EMAIL_EVERY_MS,
 }) {
   const engineUrl = (env.VIDEO_ENGINE_URL || "").trim().replace(/\/+$/, "");
   const engineKey = (env.VIDEO_ENGINE_API_KEY || "").trim();
@@ -110,6 +119,7 @@ export function registerVideoRoutes({
 
   const watching = new Set();
   let stopped = false;
+  let lastQuotaEmailAtMs = null; // v6: in memory only
   let sweepTimer = null;
   const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
@@ -134,8 +144,10 @@ export function registerVideoRoutes({
     const ref = jobRef(jobId);
     let refunded = 0;
     let notify = null;
+    let closed = false; // v6: true only for the call that closed the job
 
     await db.runTransaction(async (tx) => {
+      closed = false;
       const snap = await tx.get(ref);
       if (!snap.exists) return;
       const job = snap.data();
@@ -157,6 +169,7 @@ export function registerVideoRoutes({
         ...extra,
       };
       notify = null;
+      closed = true;
       if (extra.manualCheck && !job.manualCheck) {
         fields.manualCheckReason = String(reason);
         notify = { ...job, ...fields };
@@ -166,6 +179,7 @@ export function registerVideoRoutes({
     if (notify) sendManualCheckEmail(jobId, notify, `${reason} (credits refunded)`);
 
     log(`VIDEO ${jobId}: failed (${reason}), refunded ${refunded} credits`);
+    return closed;
   }
 
   // Writes fields only if the job is still "processing" (and not refunded).
@@ -218,6 +232,31 @@ export function registerVideoRoutes({
       sendManualCheckEmail(jobId, flagged, reason);
     }
     return Boolean(flagged);
+  }
+
+  // v6: the engine said the fal balance/quota is used up. Called AFTER the refund.
+  // At most one email per quotaEmailEveryMs; never throws.
+  function sendQuotaEmail(jobId, job) {
+    try {
+      if (lastQuotaEmailAtMs !== null && now() - lastQuotaEmailAtMs < quotaEmailEveryMs) {
+        log(`VIDEO ${jobId}: fal balance used up - email already sent in the last hour`);
+        return;
+      }
+      lastQuotaEmailAtMs = now();
+      notifyAdmin("fal balance used up - videos are failing", [
+        `Time: ${new Date(now()).toISOString()}`,
+        "The video engine says the fal balance (or the fal key) was refused.",
+        "Every video fails until the balance is topped up. Users get their credits back.",
+        "What to do: add balance at fal.ai (Billing).",
+        `Last video id: ${jobId}`,
+        `Firebase UID: ${job.uid || "-"}`,
+        `Engine id: ${job.engineId || "-"}`,
+        `Credits refunded: ${job.chargedCredits ?? "-"}`,
+        "(At most one email per hour.)",
+      ]);
+    } catch (err) {
+      log(`VIDEO ${jobId}: fal balance email failed:`, err.message);
+    }
   }
 
   // ---------- engine calls ----------
@@ -398,7 +437,10 @@ export function registerVideoRoutes({
 
     // Clear answer from the engine: "failed" (or anything that is not
     // processing / ready), or 404 for the engine id ("lost").
-    await failAndRefund(jobId, s.status === "lost" ? "engine lost the job" : s.error || "engine failed");
+    const quota = s.error_code === "provider_quota"; // v6: engine 6z4
+    const closedNow = await failAndRefund(jobId, s.status === "lost" ? "engine lost the job" : s.error || "engine failed",
+      quota ? { engineErrorCode: "provider_quota" } : {});
+    if (quota && closedNow) sendQuotaEmail(jobId, job);
     return true;
   }
 
@@ -438,6 +480,26 @@ export function registerVideoRoutes({
       ...extra,
     };
   }
+
+  // ---------- POST /video-clips/test-admin-email (v6, owner only) ----------
+  // Sends ONE test email through notifyAdmin, to check that emails leave the server.
+  // Works also when the video engine is not configured.
+  app.post("/video-clips/test-admin-email", requireAuth, async (req, res) => {
+    try {
+      if ((req.userDoc || {}).role !== "owner") {
+        return res.status(403).json({ error: "Owner only", code: "OWNER_ONLY" });
+      }
+      notifyAdmin("Test email - video alerts", [
+        `Time: ${new Date(now()).toISOString()}`,
+        "This is a test. If you got it, video alerts (fal balance, manual check) reach you.",
+      ]);
+      log("VIDEO: test admin email requested");
+      res.json({ ok: true, note: "Email requested. Check the inbox, and in Render Logs look for: ADMIN EMAIL: sent" });
+    } catch (error) {
+      log("VIDEO TEST EMAIL ERROR:", error);
+      res.status(500).json({ error: "test email failed" });
+    }
+  });
 
   // ---------- POST /video-clips ----------
   app.post("/video-clips", requireAuth, upload.single("image"), async (req, res) => {
